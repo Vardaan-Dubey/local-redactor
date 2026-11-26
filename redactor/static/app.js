@@ -10,7 +10,7 @@ const S = {
   player: null,
   nowIdx: -1,
   view: "redacted",   // "original" | "redacted"
-  src: null,          // "/media" or "/output-media" (what the player is showing)
+  src: null,          // "/media" or "/output-media?id=<export folder>" (what the player shows)
   autoMuted: false,
 };
 try { if (localStorage.getItem("view") === "original") S.view = "original"; } catch (_) {}
@@ -99,10 +99,10 @@ function loadSource(src) {
   if (!p || S.src === src) return;
   const t = S.src ? p.currentTime : 0, playing = S.src && !p.paused;
   S.src = src;
-  if (src === "/output-media") { p.dataset.output = "1"; setPicking(false); } else delete p.dataset.output;
+  if (src.startsWith("/output-media")) { p.dataset.output = "1"; setPicking(false); } else delete p.dataset.output;
   p.muted = S.autoMuted = false;
   $("videoBox").classList.remove("preview-blur");
-  p.src = src + "?v=" + Date.now();
+  p.src = src + (src.includes("?") ? "&" : "?") + "v=" + Date.now();
   if (t || playing) {
     p.addEventListener("loadedmetadata", () => {
       p.currentTime = Math.min(t, p.duration || t);
@@ -121,13 +121,18 @@ function currentOptions() {
   };
 }
 
-// The exported file is shown only while it still matches what's marked now.
-function exportIsCurrent() {
-  const ex = S.state?.last_export;
-  if (!ex || !ex.has_media) return false;
-  const now = [...S.red].sort((a, b) => a - b);
-  return JSON.stringify(ex.redacted) === JSON.stringify(now) &&
-    JSON.stringify(ex.options) === JSON.stringify(currentOptions());
+// The newest export made from exactly what's marked now (same words, padding,
+// blur setting and speaker picks), if there is one. Its file is what the
+// Redacted view plays; otherwise the view falls back to a rough live preview.
+function sameSettings(o) {
+  return JSON.stringify([+o.pad_before, +o.pad_after, o.blur_mode, !!o.failsafe,
+    (o.speaker_picks || []).map((p) => [+p.t, +p.x, +p.y])]);
+}
+function matchingExport() {
+  const now = JSON.stringify([...S.red].sort((a, b) => a - b));
+  const opts = sameSettings(currentOptions());
+  return (S.state?.exports || []).find((e) => e.has_media &&
+    JSON.stringify([...e.redacted].sort((a, b) => a - b)) === now && sameSettings(e.options) === opts);
 }
 
 function setView(v) {
@@ -143,12 +148,26 @@ function refreshView() {
   $("editor").classList.toggle("show-original", !red);
   if (!S.state || S.applying) return;
   const name = S.state.media ? S.state.media.split(/[\\/]/).pop() : "";
-  const exported = red && exportIsCurrent();
-  if (S.player) loadSource(exported ? "/output-media" : "/media");
-  $("playerLabel").textContent = !red ? name
-    : exported ? "Exported redacted copy"
-    : S.red.size ? "Preview · exact result after export" : "Nothing redacted yet";
-  $("playerLabel").title = !red ? (S.state.media || "") : "";
+  const ex = red && !S.state.media_is_export ? matchingExport() : null;
+  if (S.player) loadSource(ex ? "/output-media?id=" + encodeURIComponent(ex.id) : "/media");
+  const when = ex?.created ? new Date(ex.created).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "";
+  let label = name, tip = S.state.media || "";
+  if (S.state.media_is_export) {
+    label = "Already-redacted copy · " + name;
+    tip = "This file is an export, so it's played as is - no extra muting or blurring.";
+  } else if (red) {
+    tip = "";
+    if (ex) label = "Exported copy" + (when ? " · " + when : "");
+    else if (!S.red.size) label = "Nothing redacted yet";
+    else {
+      label = "Preview · whole frame blurred";
+      tip = (S.state.exports?.length
+        ? "Your marks or settings differ from every export of this file. "
+        : "") + "The preview can't find faces, so it blurs the whole frame. Export to get the face-only blur.";
+    }
+  }
+  $("playerLabel").textContent = label;
+  $("playerLabel").title = tip;
 }
 
 $("viewOriginal").onclick = () => setView("original");
@@ -395,7 +414,7 @@ function tick() {
   // Redacted view before export: mute, and blur the frame, during redacted words.
   // Only flip mute when it changes, so the player's own mute button still works.
   if (p && S.src === "/media") {
-    const live = S.view === "redacted" && S.red.size > 0;
+    const live = S.view === "redacted" && S.red.size > 0 && !S.state?.media_is_export;
     const mute = live && inRedaction(p.currentTime);
     if (mute !== S.autoMuted) { p.muted = mute; S.autoMuted = mute; }
     $("videoBox").classList.toggle("preview-blur", live && p === $("player") && inRedaction(p.currentTime, 0.25));
@@ -517,7 +536,7 @@ $("exportBtn").onclick = async () => {
       options: currentOptions(),
     });
     await pollJob(job, async (res) => {
-      S.state.last_export = (await api("/api/state")).last_export;
+      S.state.exports = (await api("/api/state")).exports;
       showResult(res);
       refreshView();
     });

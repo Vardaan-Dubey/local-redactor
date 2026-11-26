@@ -55,7 +55,7 @@ This opens the editor in your browser. You can also start it with no arguments a
 
 1. **Select text** with the mouse and press **R** (or click the floating *Redact* button). Press **U** to un-redact a selection. **Ctrl/Cmd+Z** undoes.
 2. **Find phrase → Redact all matches** redacts every occurrence of a name, number and so on.
-3. Click any word to jump the player there. Use the **Original / Redacted** switch under the player (or press **V**) to compare. *Original* plays the source with redacted words readable but marked. *Redacted* blacks the words out, mutes them, and blurs the frame while they're spoken (a preview), or plays the exported copy once it matches your redactions.
+3. Click any word to jump the player there. Use the **Original / Redacted** switch under the player (or press **V**) to compare. *Original* plays the source with redacted words readable but marked. *Redacted* plays the exported copy whose report matches your current marks and settings. If no export matches yet, it shows a rough preview: the words are blacked out and muted, and the whole frame is blurred while they're spoken, because the browser can't find faces. Opening a `.redacted` file the tool made plays it as is.
 4. **Export redacted copies**. The *Redacted* view then plays the exported file.
 
 Your selections are saved automatically in the browser's local storage. Only word positions and the paths of the open files are saved, not the words.
@@ -70,7 +70,6 @@ No transcript yet? Enter the media path and click **Transcribe locally**. This p
   interview.redacted.srt      # same format as the input transcript
   interview.redacted.txt
   redaction_report.json       # spans, settings, source hashes (verified unchanged), output hashes
-<source>_redacted/last_export.json   # which export the Redacted view plays (word positions + settings)
 ```
 
 ### Headless / batch

@@ -18,7 +18,7 @@ import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from . import media as M
 from .export import default_output_root, export
@@ -37,7 +37,7 @@ class State:
         self.media_info: dict | None = None
         self.transcript = None
         self.out_root: Path | None = None
-        self.last_export: dict | None = None  # what the latest export of these files redacted
+        self.exports: list[dict] = []  # earlier exports of these exact files, newest first
         self.jobs: dict[str, dict] = {}
         self.lock = threading.Lock()
 
@@ -50,43 +50,44 @@ class State:
             raise FileNotFoundError(f"Transcript not found: {transcript}")
         if not media and not transcript:
             raise ValueError("Provide a media file and/or a transcript")
-        old_transcript = self.transcript.source_path if self.transcript else None
-        if media != self.media or transcript != old_transcript:
-            # An earlier export belongs to the previous files.
-            self.cfg.pop("last_output_media", None)
-            self.last_export = None
         self.media = media
         self.media_info = M.probe(media).to_dict() if media else None
         self.transcript = load_transcript(transcript) if transcript else None
         self.out_root = Path(out_root).expanduser().resolve() if out_root else \
             default_output_root(media, transcript)
-        if self.last_export is None:
-            self._load_last_export()
+        self.find_exports()
 
-    # The latest export of these exact files is remembered in the output folder,
-    # so the "Redacted" view can still play it after a restart.
-    LAST_EXPORT = "last_export.json"
+    # Every export folder holds a redaction_report.json with the word positions,
+    # settings and source files it was made from. Reading those (rather than
+    # keeping a separate record) finds every export of these files, old or new.
+    MEDIA_OUT = {".mp4", ".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
 
-    def _load_last_export(self):
-        try:
-            rec = json.loads((self.out_root / self.LAST_EXPORT).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return
+    def find_exports(self):
+        found = []
         tpath = self.transcript.source_path if self.transcript else None
-        out = rec.get("media_out")
-        if rec.get("media") == self.media and rec.get("transcript") == tpath and \
-                (not out or Path(out).is_file()):
-            self.cfg["last_output_media"] = out
-            self.last_export = {k: rec.get(k) for k in ("redacted", "options", "has_media")}
+        want = {p for p in (self.media, tpath) if p}
+        for rep in sorted(self.out_root.glob("export_*/redaction_report.json"), reverse=True):
+            try:
+                r = json.loads(rep.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if set(r.get("sources_sha256_unchanged") or {}) != want:
+                continue
+            outs = [f for f in rep.parent.iterdir()
+                    if ".redacted." in f.name and f.suffix.lower() in self.MEDIA_OUT]
+            found.append({"id": rep.parent.name, "created": r.get("created"),
+                          "redacted": r.get("redacted_word_indices") or [],
+                          "options": r.get("options") or {},
+                          "media_out": str(outs[0]) if outs else None})
+        self.exports = found
 
-    def save_last_export(self, media_out: str | None):
-        self.cfg["last_output_media"] = media_out
-        rec = dict(self.last_export or {}, media=self.media, media_out=media_out,
-                   transcript=self.transcript.source_path if self.transcript else None)
-        try:
-            (self.out_root / self.LAST_EXPORT).write_text(json.dumps(rec, indent=1), encoding="utf-8")
-        except OSError:
-            pass  # only a convenience
+    def export_media(self, export_id: str) -> str | None:
+        return next((e["media_out"] for e in self.exports if e["id"] == export_id), None)
+
+    def media_is_export(self) -> bool:
+        """True when the open video is itself a redacted copy made by this tool."""
+        m = Path(self.media) if self.media else None
+        return bool(m and ".redacted." in m.name and (m.parent / "redaction_report.json").is_file())
 
     def snapshot(self) -> dict:
         return {
@@ -95,7 +96,9 @@ class State:
             "transcript": self.transcript.to_ui() if self.transcript else None,
             "out_root": str(self.out_root) if self.out_root else None,
             "whisper_model": self.cfg.get("whisper_model"),
-            "last_export": self.last_export,
+            "exports": [{k: e[k] for k in ("id", "created", "redacted", "options")}
+                        | {"has_media": bool(e["media_out"])} for e in self.exports],
+            "media_is_export": self.media_is_export(),
         }
 
     def start_job(self, fn) -> str:
@@ -180,7 +183,8 @@ def make_handler(state: State, port: int):
             if path == "/media":
                 return self._media(state.media)
             if path == "/output-media":
-                return self._media(state.cfg.get("last_output_media"))
+                q = parse_qs(urlparse(self.path).query)
+                return self._media(state.export_media((q.get("id") or [""])[0]))
             self._json({"error": "not found"}, 404)
 
         def _static(self, name):
@@ -266,10 +270,7 @@ def make_handler(state: State, port: int):
             def job(progress):
                 res = export(tr, body.get("redacted", []), media, out_root, opts, progress)
                 if state.media == media and state.transcript is tr:  # files not switched meanwhile
-                    state.last_export = {"redacted": sorted(body.get("redacted", [])),
-                                         "options": body.get("options") or {},
-                                         "has_media": bool(res["outputs"].get("media"))}
-                    state.save_last_export(res["outputs"].get("media"))
+                    state.find_exports()
                 return res
 
             self._json({"job": state.start_job(job)})
