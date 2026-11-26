@@ -62,6 +62,14 @@ function applyState(st) {
     $("playerLabel").textContent = "";
   }
   S.state = st;
+  // Remembered so the same files reopen after the server restarts (it restarts
+  // itself when the app's code changes) - then a page refresh is all it takes.
+  if (st.media || st.transcript_path) {
+    try {
+      localStorage.setItem("lastOpen", JSON.stringify(
+        { media: st.media, transcript: st.transcript_path, out_root: st.out_root }));
+    } catch (_) {}
+  }
   $("mediaPath").value = st.media || "";
   $("transcriptPath").value = st.transcript_path || "";
   $("outRoot").value = st.out_root || "";
@@ -544,5 +552,16 @@ function showError(err) {
 
 // ------------------------------------------------------------- Start ----
 refreshView();
-api("/api/state").then(applyState).catch(() => {});
+(async () => {
+  let st = await api("/api/state");
+  if (!st.media && !st.transcript_path) {
+    let last = null;
+    try { last = JSON.parse(localStorage.getItem("lastOpen") || "null"); } catch (_) {}
+    if (last) {
+      try { st = await api("/api/open", last); }
+      catch (_) { try { localStorage.removeItem("lastOpen"); } catch (_) {} }  // moved or deleted
+    }
+  }
+  applyState(st);
+})().catch(() => {});
 requestAnimationFrame(tick);

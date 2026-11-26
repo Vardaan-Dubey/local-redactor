@@ -37,6 +37,8 @@ The **first start** sets everything up and needs internet once. It takes a few m
 
 No admin rights, Homebrew, sudo or winget are needed, and nothing is installed system-wide. **Later starts run fully offline.** The editor opens in your browser at http://127.0.0.1:8765. Keep the terminal window open while you use it; closing it stops the editor.
 
+You don't need to restart after an update. When the app's code changes (after a `git pull`, for example), the editor restarts itself within a second or two. **Refresh the page** and the same files reopen. Starting it a second time just opens the copy that's already running. To turn the automatic restart off, start it with `--no-reload`.
+
 For more accurate transcription, set `WHISPER_MODEL=large-v3` before the first start (about 3 GB).
 
 If you already have ffmpeg somewhere, `REDACTOR_FFMPEG=/path/to/ffmpeg` overrides the bundled one.
@@ -49,14 +51,14 @@ To remove everything, delete this folder (and `~/.local/bin/uv` if you don't use
 ./start.sh --media ~/Desktop/interview.mp4 --transcript ~/Desktop/interview.srt
 ```
 
-This opens the editor in your browser. You can also start it with no arguments and type or paste the paths into the top bar. On a Mac, drag a file from Finder into Terminal or into the box to paste its path.
+This opens the editor in your browser. You can also start it with no arguments and use **Browse…** to choose files, or type or paste paths into the top bar. On a Mac, drag a file from Finder into Terminal or into the box to paste its path.
 
 1. **Select text** with the mouse and press **R** (or click the floating *Redact* button). Press **U** to un-redact a selection. **Ctrl/Cmd+Z** undoes.
 2. **Find phrase → Redact all matches** redacts every occurrence of a name, number and so on.
-3. Click any word to jump the player there. During preview, redacted parts are muted so you can hear what the output will sound like.
-4. **Export redacted copies**. Then use **Review redacted output in player** to check the result.
+3. Click any word to jump the player there. Use the **Original / Redacted** switch under the player (or press **V**) to compare. *Original* plays the source with redacted words readable but marked. *Redacted* blacks the words out, mutes them, and blurs the frame while they're spoken (a preview), or plays the exported copy once it matches your redactions.
+4. **Export redacted copies**. The *Redacted* view then plays the exported file.
 
-Your selections are saved automatically in the browser's local storage. Only word positions are saved, not the words.
+Your selections are saved automatically in the browser's local storage. Only word positions and the paths of the open files are saved, not the words.
 
 No transcript yet? Enter the media path and click **Transcribe locally**. This produces a transcript with timings for each word, which gives tighter mutes than SRT/VTT. That transcript is unredacted and is saved in `<output>/workspace/`.
 
@@ -68,6 +70,7 @@ No transcript yet? Enter the media path and click **Transcribe locally**. This p
   interview.redacted.srt      # same format as the input transcript
   interview.redacted.txt
   redaction_report.json       # spans, settings, source hashes (verified unchanged), output hashes
+<source>_redacted/last_export.json   # which export the Redacted view plays (word positions + settings)
 ```
 
 ### Headless / batch

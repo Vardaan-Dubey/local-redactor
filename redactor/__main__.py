@@ -1,6 +1,7 @@
 """Entry point.
 
-  python -m redactor [--media FILE] [--transcript FILE]      # open the editor
+  python -m redactor [--media FILE] [--transcript FILE]      # open the editor (restarts itself
+                                                              # when the code changes; --no-reload to turn off)
   python -m redactor redact --media F --transcript T --find "Jane Doe" --find "555-0100"
   python -m redactor transcribe --media F [--model small]
   python -m redactor download-model small                     # one-time, explicit
@@ -51,6 +52,7 @@ def setup_models(whisper: str = "small") -> None:
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    full_argv = list(argv)
     cmd = argv.pop(0) if argv and argv[0] in ("serve", "redact", "transcribe", "download-model", "setup") else "serve"
     ap = argparse.ArgumentParser(prog="python -m redactor " + cmd)
     if cmd == "setup":
@@ -73,6 +75,8 @@ def main(argv=None):
     if cmd == "serve":
         ap.add_argument("--port", type=int, default=8765)
         ap.add_argument("--no-browser", action="store_true")
+        ap.add_argument("--no-reload", action="store_true",
+                        help="don't restart the server automatically when the code changes")
     if cmd == "redact":
         ap.add_argument("--find", action="append", default=[], help="phrase to redact (repeatable)")
         ap.add_argument("--indices", help="JSON file with a list of word indices to redact")
@@ -88,6 +92,9 @@ def main(argv=None):
     cfg = {"whisper_model": a.whisper_model, "yunet_model": a.yunet_model}
 
     if cmd == "serve":
+        from . import reloader
+        if not a.no_reload and not reloader.is_child():
+            sys.exit(reloader.supervise(full_argv))
         from .server import serve
         serve(cfg, a.media, a.transcript, a.out, a.port, not a.no_browser)
     elif cmd == "transcribe":

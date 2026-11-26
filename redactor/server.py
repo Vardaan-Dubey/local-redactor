@@ -60,6 +60,33 @@ class State:
         self.transcript = load_transcript(transcript) if transcript else None
         self.out_root = Path(out_root).expanduser().resolve() if out_root else \
             default_output_root(media, transcript)
+        if self.last_export is None:
+            self._load_last_export()
+
+    # The latest export of these exact files is remembered in the output folder,
+    # so the "Redacted" view can still play it after a restart.
+    LAST_EXPORT = "last_export.json"
+
+    def _load_last_export(self):
+        try:
+            rec = json.loads((self.out_root / self.LAST_EXPORT).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        tpath = self.transcript.source_path if self.transcript else None
+        out = rec.get("media_out")
+        if rec.get("media") == self.media and rec.get("transcript") == tpath and \
+                (not out or Path(out).is_file()):
+            self.cfg["last_output_media"] = out
+            self.last_export = {k: rec.get(k) for k in ("redacted", "options", "has_media")}
+
+    def save_last_export(self, media_out: str | None):
+        self.cfg["last_output_media"] = media_out
+        rec = dict(self.last_export or {}, media=self.media, media_out=media_out,
+                   transcript=self.transcript.source_path if self.transcript else None)
+        try:
+            (self.out_root / self.LAST_EXPORT).write_text(json.dumps(rec, indent=1), encoding="utf-8")
+        except OSError:
+            pass  # only a convenience
 
     def snapshot(self) -> dict:
         return {
@@ -239,10 +266,10 @@ def make_handler(state: State, port: int):
             def job(progress):
                 res = export(tr, body.get("redacted", []), media, out_root, opts, progress)
                 if state.media == media and state.transcript is tr:  # files not switched meanwhile
-                    state.cfg["last_output_media"] = res["outputs"].get("media")
                     state.last_export = {"redacted": sorted(body.get("redacted", [])),
                                          "options": body.get("options") or {},
                                          "has_media": bool(res["outputs"].get("media"))}
+                    state.save_last_export(res["outputs"].get("media"))
                 return res
 
             self._json({"job": state.start_job(job)})
@@ -266,13 +293,46 @@ def make_handler(state: State, port: int):
     return H
 
 
+def _already_running(port: int) -> bool:
+    """True if a Local Redactor server is already answering on this port."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=2) as r:
+            return "whisper_model" in json.loads(r.read() or b"{}")
+    except Exception:
+        return False
+
+
+def _hand_over(port: int, media, transcript, out_root) -> None:
+    """Give files from the command line to the running server."""
+    import urllib.request
+    absolute = lambda p: str(Path(p).expanduser().resolve()) if p else None
+    body = json.dumps({"media": absolute(media), "transcript": absolute(transcript),
+                       "out_root": absolute(out_root)}).encode()
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/open", data=body,
+                                 headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=60).close()
+
+
 def serve(cfg: dict, media=None, transcript=None, out_root=None, port=8765, open_browser=True):
-    state = State(cfg)
+    url = f"http://127.0.0.1:{port}/"
+    try:
+        state = State(cfg)
+        httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(state, port))
+    except OSError:
+        if not _already_running(port):
+            raise
+        # Started twice: use the copy that's already running instead of failing.
+        if media or transcript:
+            _hand_over(port, media, transcript, out_root)
+        print(f"Local Redactor is already running at {url} - opening it.")
+        if open_browser:
+            import webbrowser
+            webbrowser.open(url)
+        return
     if media or transcript:
         state.open(media, transcript, out_root)
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(state, port))
-    url = f"http://127.0.0.1:{port}/"
-    print(f"Local Redactor running at {url}  (localhost only - Ctrl+C to stop)")
+    print(f"Local Redactor running at {url}  (localhost only - Ctrl+C to stop)", flush=True)
     if open_browser:
         import webbrowser
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
