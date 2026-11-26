@@ -10,9 +10,18 @@
 <header class="top">
   <div class="brand">Local Redactor <span class="badge" title="Server bound to 127.0.0.1; page cannot load or send anything off this machine">● offline / localhost only</span></div>
   <form id="openForm" class="paths">
-    <input id="mediaPath" placeholder="/path/to/video-or-audio (mp4, mov, wav, mp3…)" spellcheck="false">
-    <input id="transcriptPath" placeholder="/path/to/transcript (.srt .vtt .json .txt) — optional if transcribing" spellcheck="false">
-    <input id="outRoot" placeholder="output folder (default: &lt;source&gt;_redacted)" spellcheck="false">
+    <div class="field">
+      <input id="mediaPath" placeholder="/path/to/video-or-audio (mp4, mov, wav, mp3…)" spellcheck="false">
+      <button type="button" class="ghost browse" data-kind="media" data-target="mediaPath" title="Choose a video or audio file">Browse…</button>
+    </div>
+    <div class="field">
+      <input id="transcriptPath" placeholder="/path/to/transcript (.srt .vtt .json .txt) — optional if transcribing" spellcheck="false">
+      <button type="button" class="ghost browse" data-kind="transcript" data-target="transcriptPath" title="Choose a transcript file">Browse…</button>
+    </div>
+    <div class="field">
+      <input id="outRoot" placeholder="output folder (default: &lt;source&gt;_redacted)" spellcheck="false">
+      <button type="button" class="ghost browse" data-kind="folder" data-target="outRoot" title="Choose an output folder">Browse…</button>
+    </div>
     <button type="submit">Open</button>
     <button type="button" id="transcribeBtn" class="secondary" title="Transcribe locally with Whisper (word-level timings)">Transcribe locally</button>
   </form>

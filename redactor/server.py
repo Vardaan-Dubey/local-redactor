@@ -215,6 +215,9 @@ def make_handler(state: State, port: int):
                     return self._export(body)
                 if path == "/api/transcribe":
                     return self._transcribe(body)
+                if path == "/api/pick":
+                    from .picker import pick
+                    return self._json({"path": pick(body.get("kind", ""), body.get("start") or None)})
                 self._json({"error": "not found"}, 404)
             except Exception as e:
                 self._json({"error": str(e)}, 400)

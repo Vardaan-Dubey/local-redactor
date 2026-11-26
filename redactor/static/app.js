@@ -358,12 +358,31 @@ document.addEventListener("keydown", (e) => {
 
 $("openForm").addEventListener("submit", async (e) => {
   e.preventDefault();
+  const media = $("mediaPath").value.trim(), transcript = $("transcriptPath").value.trim();
+  let out_root = $("outRoot").value.trim();
+  // The box shows the previous file's default output folder; when different
+  // files are opened, let the server pick a fresh default instead of reusing it.
+  const st = S.state;
+  if (st && out_root === (st.out_root || "") &&
+      (media !== (st.media || "") || transcript !== (st.transcript_path || ""))) out_root = "";
   try {
-    applyState(await api("/api/open", {
-      media: $("mediaPath").value.trim(), transcript: $("transcriptPath").value.trim(),
-      out_root: $("outRoot").value.trim(),
-    }));
+    applyState(await api("/api/open", { media, transcript, out_root }));
   } catch (err) { alert(err.message); }
+});
+
+// "Browse…" opens the OS file dialog via the local server (a browser file
+// input can't reveal the real path, and originals are read in place).
+document.querySelectorAll(".browse").forEach((btn) => {
+  btn.onclick = async () => {
+    const input = $(btn.dataset.target);
+    const start = input.value.trim() || $("mediaPath").value.trim() || $("transcriptPath").value.trim();
+    btn.disabled = true;
+    try {
+      const { path } = await api("/api/pick", { kind: btn.dataset.kind, start });
+      if (path) input.value = path;  // empty = cancelled
+    } catch (err) { alert(err.message); }
+    finally { btn.disabled = false; }
+  };
 });
 
 $("transcribeBtn").onclick = async () => {
