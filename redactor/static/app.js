@@ -49,6 +49,14 @@ function fmt(t) {
 }
 
 function applyState(st) {
+  const prev = S.state;
+  if (prev && (prev.media !== st.media || prev.transcript_path !== st.transcript_path)) {
+    // Different files: clear results and messages left from the previous ones.
+    $("result").hidden = true; $("result").innerHTML = "";
+    $("job").hidden = true; $("jobBar").style.width = "0"; $("jobMsg").textContent = "";
+    $("findInput").value = ""; $("findInput").placeholder = "Find phrase…";
+    $("playerLabel").textContent = "";
+  }
   S.state = st;
   $("mediaPath").value = st.media || "";
   $("transcriptPath").value = st.transcript_path || "";
@@ -62,7 +70,7 @@ function setupPlayer(src, info, label) {
   v.hidden = a.hidden = true; v.removeAttribute("src"); a.removeAttribute("src");
   delete v.dataset.output; delete a.dataset.output; v.muted = a.muted = false;
   S.player = null;
-  if (!info) return;
+  if (!info) { $("speakerPanel").hidden = true; S.picks = []; renderPicks(); return; }
   S.player = info.has_video ? v : a;
   S.player.hidden = false;
   S.player.src = src + "?v=" + Date.now();
@@ -358,11 +366,14 @@ document.addEventListener("keydown", (e) => {
 
 $("openForm").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const media = $("mediaPath").value.trim(), transcript = $("transcriptPath").value.trim();
-  let out_root = $("outRoot").value.trim();
+  const media = $("mediaPath").value.trim();
+  let transcript = $("transcriptPath").value.trim(), out_root = $("outRoot").value.trim();
+  const st = S.state;
+  // A new video starts clean: the transcript that belonged to the previous
+  // video is dropped (one the user just chose themselves is kept).
+  if (st?.media && media !== st.media && transcript === (st.transcript_path || "")) transcript = "";
   // The box shows the previous file's default output folder; when different
   // files are opened, let the server pick a fresh default instead of reusing it.
-  const st = S.state;
   if (st && out_root === (st.out_root || "") &&
       (media !== (st.media || "") || transcript !== (st.transcript_path || ""))) out_root = "";
   try {
@@ -379,7 +390,12 @@ document.querySelectorAll(".browse").forEach((btn) => {
     btn.disabled = true;
     try {
       const { path } = await api("/api/pick", { kind: btn.dataset.kind, start });
-      if (path) input.value = path;  // empty = cancelled
+      if (!path) return;  // cancelled
+      input.value = path;
+      // Open what was picked straight away. A folder alone opens nothing.
+      if (btn.dataset.kind !== "folder" || S.state?.media || S.state?.transcript_path) {
+        $("openForm").requestSubmit();
+      }
     } catch (err) { alert(err.message); }
     finally { btn.disabled = false; }
   };

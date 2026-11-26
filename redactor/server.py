@@ -49,6 +49,8 @@ class State:
             raise FileNotFoundError(f"Transcript not found: {transcript}")
         if not media and not transcript:
             raise ValueError("Provide a media file and/or a transcript")
+        if media != self.media:
+            self.cfg.pop("last_output_media", None)  # that export belongs to the old file
         self.media = media
         self.media_info = M.probe(media).to_dict() if media else None
         self.transcript = load_transcript(transcript) if transcript else None
