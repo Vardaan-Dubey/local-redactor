@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Redactor</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">Local Redactor <span class="badge" title="Server bound to 127.0.0.1; page cannot load or send anything off this machine">● offline / localhost only</span></div>
+  <form id="openForm" class="paths">
+    <input id="mediaPath" placeholder="/path/to/video-or-audio (mp4, mov, wav, mp3…)" spellcheck="false">
+    <input id="transcriptPath" placeholder="/path/to/transcript (.srt .vtt .json .txt) — optional if transcribing" spellcheck="false">
+    <input id="outRoot" placeholder="output folder (default: &lt;source&gt;_redacted)" spellcheck="false">
+    <button type="submit">Open</button>
+    <button type="button" id="transcribeBtn" class="secondary" title="Transcribe locally with Whisper (word-level timings)">Transcribe locally</button>
+  </form>
+</header>
+
+<main>
+  <section class="editor-wrap">
+    <div class="toolbar">
+      <button id="redactBtn" title="Redact selected text (R)">Redact selection <kbd>R</kbd></button>
+      <button id="unredactBtn" class="secondary" title="Remove redaction from selected text (U)">Unredact <kbd>U</kbd></button>
+      <button id="undoBtn" class="ghost" title="Undo (Ctrl+Z)">Undo</button>
+      <button id="redoBtn" class="ghost" title="Redo (Ctrl+Shift+Z)">Redo</button>
+      <span class="sep"></span>
+      <form id="findForm" class="find">
+        <input id="findInput" placeholder="Find phrase…" spellcheck="false">
+        <button type="submit" class="secondary">Redact all matches</button>
+      </form>
+    </div>
+    <article id="editor" class="editor" tabindex="0" aria-label="Transcript">
+      <p class="empty">Open a media file and transcript above (or start with <code>python -m redactor --media … --transcript …</code>).<br><br>
+        Select text with the mouse, then press <kbd>R</kbd>. Click a word to jump the player to it.</p>
+    </article>
+    <div id="floatBtn" class="float-btn" hidden>Redact</div>
+  </section>
+
+  <aside class="side">
+    <div class="player-wrap">
+      <div class="video-box">
+        <video id="player" controls preload="metadata" hidden></video>
+        <div id="pickLayer" class="pick-layer" hidden></div>
+      </div>
+      <audio id="aplayer" controls preload="metadata" hidden></audio>
+      <div class="player-opts">
+        <label><input type="checkbox" id="previewMute" checked> Mute redacted parts during preview</label>
+        <span id="playerLabel" class="muted"></span>
+      </div>
+    </div>
+
+    <div class="panel" id="speakerPanel" hidden>
+      <h2>Speaker face <span id="pickCount" class="count">0</span></h2>
+      <button id="pickBtn" class="secondary" title="Pause on the speaker, then click their face in the video">Pick speaker face</button>
+      <p id="pickHint" class="hint">Pause where the speaker is on screen and click their face. Only that face is blurred, followed from frame to frame. Pick again after a camera cut. With no pick, “Speaker only” blurs the largest face.</p>
+      <ol id="pickList" class="red-list"></ol>
+    </div>
+
+    <div class="panel">
+      <h2>Redactions <span id="redCount" class="count">0</span></h2>
+      <ol id="redList" class="red-list"></ol>
+    </div>
+
+    <div class="panel">
+      <h2>Export</h2>
+      <div class="grid">
+        <label>Pad before (s)<input type="number" id="padBefore" value="0.10" step="0.05" min="0"></label>
+        <label>Pad after (s)<input type="number" id="padAfter" value="0.15" step="0.05" min="0"></label>
+        <label>Blur
+          <select id="blurMode">
+            <option value="speaker" selected>Speaker only</option>
+            <option value="faces">All faces</option>
+            <option value="frame">Whole frame</option>
+          </select>
+        </label>
+        <label class="chk"><input type="checkbox" id="failsafe" checked> Blur whole frame if no face is found</label>
+      </div>
+      <button id="exportBtn" class="primary">Export redacted copies</button>
+      <p class="hint">Originals are read-only. Copies go to a new timestamped folder and source hashes are verified after export.</p>
+      <div id="job" class="job" hidden>
+        <div class="bar"><div id="jobBar"></div></div>
+        <div id="jobMsg" class="muted"></div>
+      </div>
+      <div id="result" class="result" hidden></div>
+    </div>
+  </aside>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

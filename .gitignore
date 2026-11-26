@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Whisper models are large (hundreds of MB to GBs); setup.sh downloads them
+models/whisper/
+
+# OS / editor
+.DS_Store
+Thumbs.db

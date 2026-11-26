@@ -1,0 +1,439 @@
+// Local Redactor editor. Talks only to the localhost server that served it.
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const S = {
+  state: null,
+  words: [],          // [{i, t, s, e, el}]
+  red: new Set(),     // redacted word indices
+  undo: [], redo: [],
+  player: null,
+  nowIdx: -1,
+};
+
+// ---------------------------------------------------------------- API ----
+async function api(path, body) {
+  const opt = body === undefined ? {} :
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const r = await fetch(path, opt);
+  const j = await r.json();
+  if (!r.ok || j.error) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+async function pollJob(id, onDone) {
+  $("job").hidden = false;
+  for (;;) {
+    const j = await api("/api/job/" + id);
+    $("jobBar").style.width = (j.progress * 100).toFixed(1) + "%";
+    $("jobMsg").textContent = j.message || "";
+    if (j.status === "done") { onDone(j.result); return; }
+    if (j.status === "error") throw new Error(j.error);
+    await new Promise((r) => setTimeout(r, 400));
+  }
+}
+
+// ------------------------------------------------------------ Loading ----
+function storageKey() { return "redactions:" + (S.state?.transcript_path || ""); }
+function persist() {
+  try { localStorage.setItem(storageKey(), JSON.stringify([...S.red])); } catch (_) {}
+}
+function restore() {
+  try { return new Set(JSON.parse(localStorage.getItem(storageKey()) || "[]")); } catch (_) { return new Set(); }
+}
+
+function fmt(t) {
+  if (t == null) return "--:--";
+  const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = (t % 60);
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + s.toFixed(1).padStart(4, "0");
+}
+
+function applyState(st) {
+  S.state = st;
+  $("mediaPath").value = st.media || "";
+  $("transcriptPath").value = st.transcript_path || "";
+  $("outRoot").value = st.out_root || "";
+  setupPlayer("/media", st.media_info, st.media ? st.media.split(/[\\/]/).pop() : "");
+  renderTranscript(st.transcript);
+}
+
+function setupPlayer(src, info, label) {
+  const v = $("player"), a = $("aplayer");
+  v.hidden = a.hidden = true; v.removeAttribute("src"); a.removeAttribute("src");
+  delete v.dataset.output; delete a.dataset.output; v.muted = a.muted = false;
+  S.player = null;
+  if (!info) return;
+  S.player = info.has_video ? v : a;
+  S.player.hidden = false;
+  S.player.src = src + "?v=" + Date.now();
+  $("playerLabel").textContent = label;
+  setPicking(false);
+  $("speakerPanel").hidden = !info.has_video;
+  if (src === "/media") { S.picks = restorePicks(); renderPicks(); }
+}
+
+// ------------------------------------------------------ Speaker picks ----
+// A pick is {t, x, y}: a moment in the video and a point on the speaker's face
+// as fractions of the frame. Export blurs only the face nearest the pick and
+// follows it frame to frame.
+S.picks = [];
+S.picking = false;
+
+function picksKey() { return "picks:" + (S.state?.media || ""); }
+function savePicks() { try { localStorage.setItem(picksKey(), JSON.stringify(S.picks)); } catch (_) {} }
+function restorePicks() {
+  try { return JSON.parse(localStorage.getItem(picksKey()) || "[]").filter((p) => isFinite(p.t)); } catch (_) { return []; }
+}
+
+// The video is letterboxed inside its element (object-fit: contain): map
+// between element pixels and 0..1 frame fractions.
+function videoRect() {
+  const v = $("player"), r = v.getBoundingClientRect();
+  const vw = v.videoWidth || 16, vh = v.videoHeight || 9;
+  const sc = Math.min(r.width / vw, r.height / vh);
+  return { r, w: vw * sc, h: vh * sc, ox: (r.width - vw * sc) / 2, oy: (r.height - vh * sc) / 2 };
+}
+
+function setPicking(on) {
+  const v = $("player");
+  S.picking = on && !v.hidden && !v.dataset.output;
+  $("pickLayer").hidden = v.hidden;
+  $("pickLayer").classList.toggle("active", S.picking);
+  $("pickBtn").classList.toggle("on", S.picking);
+  $("pickBtn").textContent = S.picking ? "Click the speaker's face… (Esc to cancel)" : "Pick speaker face";
+  if (S.picking) v.pause();
+  drawPickDots();
+}
+
+function drawPickDots() {
+  const layer = $("pickLayer"), v = $("player");
+  layer.replaceChildren();
+  if (v.hidden || v.dataset.output || !S.picks.length) return;
+  const vr = videoRect(), t = v.currentTime;
+  for (const p of S.picks) {
+    const dt = Math.abs(p.t - t);
+    if (dt > 2) continue;
+    const d = document.createElement("div");
+    d.className = "pick-dot" + (dt > 0.3 ? " stale" : "");
+    d.style.left = (vr.ox + p.x * vr.w) + "px";
+    d.style.top = (vr.oy + p.y * vr.h) + "px";
+    layer.appendChild(d);
+  }
+}
+
+function renderPicks() {
+  const list = $("pickList");
+  list.replaceChildren();
+  for (const p of S.picks) {
+    const li = document.createElement("li");
+    const t = document.createElement("span"); t.className = "t"; t.textContent = fmt(p.t);
+    const txt = document.createElement("span"); txt.className = "txt";
+    txt.textContent = `face at ${Math.round(p.x * 100)}% across, ${Math.round(p.y * 100)}% down`;
+    const x = document.createElement("button"); x.className = "x"; x.textContent = "✕"; x.title = "Remove pick";
+    x.onclick = (e) => { e.stopPropagation(); S.picks = S.picks.filter((q) => q !== p); savePicks(); renderPicks(); };
+    li.append(t, txt, x);
+    li.onclick = () => { if (S.player) { S.player.pause(); S.player.currentTime = p.t; } };
+    list.appendChild(li);
+  }
+  $("pickCount").textContent = S.picks.length;
+  drawPickDots();
+}
+
+$("pickBtn").onclick = () => setPicking(!S.picking);
+$("pickLayer").addEventListener("click", (e) => {
+  if (!S.picking) return;
+  const vr = videoRect();
+  const x = (e.clientX - vr.r.left - vr.ox) / vr.w, y = (e.clientY - vr.r.top - vr.oy) / vr.h;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return;
+  const t = Math.round($("player").currentTime * 100) / 100;
+  // One pick per moment: re-clicking at the same time replaces it.
+  S.picks = S.picks.filter((p) => Math.abs(p.t - t) > 0.05);
+  S.picks.push({ t, x: Math.round(x * 1000) / 1000, y: Math.round(y * 1000) / 1000 });
+  S.picks.sort((a, b) => a.t - b.t);
+  $("blurMode").value = "speaker";
+  savePicks(); renderPicks(); setPicking(false);
+});
+$("player").addEventListener("timeupdate", drawPickDots);
+$("player").addEventListener("seeked", drawPickDots);
+window.addEventListener("resize", drawPickDots);
+
+function renderTranscript(tr) {
+  const ed = $("editor");
+  ed.innerHTML = "";
+  S.words = []; S.undo = []; S.redo = [];
+  if (!tr) {
+    ed.innerHTML = '<p class="empty">No transcript loaded. Provide one, or click “Transcribe locally”.</p>';
+    S.red = new Set(); updateRedactions(); return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const seg of tr.segments) {
+    const p = document.createElement("p");
+    p.className = "seg";
+    if (seg.start != null || seg.speaker) {
+      const h = document.createElement("span");
+      h.className = "seg-head";
+      h.contentEditable = "false";
+      h.innerHTML = (seg.start != null ? fmt(seg.start) : "") + (seg.speaker ? " · <b></b>" : "");
+      if (seg.speaker) h.querySelector("b").textContent = seg.speaker;
+      p.appendChild(h);
+    }
+    seg.words.forEach((w, k) => {
+      const sp = document.createElement("span");
+      sp.className = "w";
+      sp.dataset.i = w.i;
+      sp.textContent = w.t;
+      if (w.s != null) sp.title = fmt(w.s) + " – " + fmt(w.e);
+      p.appendChild(sp);
+      if (k < seg.words.length - 1) p.appendChild(document.createTextNode(" "));
+      S.words[w.i] = { ...w, el: sp };
+    });
+    frag.appendChild(p);
+  }
+  ed.appendChild(frag);
+  if (!tr.timed && S.state.media) {
+    const warn = document.createElement("p");
+    warn.className = "empty";
+    warn.textContent = "⚠ This transcript has no timestamps, so audio/video can't be aligned. Use SRT/VTT/JSON or “Transcribe locally”.";
+    ed.prepend(warn);
+  }
+  S.red = new Set([...restore()].filter((i) => i < S.words.length));
+  updateRedactions();
+}
+
+// --------------------------------------------------------- Redaction ----
+function selectedIndices() {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return [];
+  const out = new Set();
+  for (let r = 0; r < sel.rangeCount; r++) {
+    const range = sel.getRangeAt(r);
+    if (!$("editor").contains(range.commonAncestorContainer)) continue;
+    for (const w of S.words) {
+      if (!w) continue;
+      // A partially selected word counts as selected (whole word is redacted).
+      if (range.intersectsNode(w.el.firstChild)) {
+        const txt = w.el.firstChild;
+        if (range.endContainer === txt && range.endOffset === 0) continue;
+        if (range.startContainer === txt && range.startOffset === txt.length) continue;
+        out.add(w.i);
+      }
+    }
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+function change(indices, on) {
+  const changed = indices.filter((i) => S.red.has(i) !== on);
+  if (!changed.length) return 0;
+  S.undo.push({ indices: changed, on }); S.redo = [];
+  changed.forEach((i) => on ? S.red.add(i) : S.red.delete(i));
+  updateRedactions();
+  return changed.length;
+}
+
+function undo() {
+  const op = S.undo.pop(); if (!op) return;
+  op.indices.forEach((i) => op.on ? S.red.delete(i) : S.red.add(i));
+  S.redo.push(op); updateRedactions();
+}
+function redo() {
+  const op = S.redo.pop(); if (!op) return;
+  op.indices.forEach((i) => op.on ? S.red.add(i) : S.red.delete(i));
+  S.undo.push(op); updateRedactions();
+}
+
+function runs() {
+  const idx = [...S.red].sort((a, b) => a - b), out = [];
+  for (const i of idx) {
+    const last = out[out.length - 1];
+    if (last && i === last[last.length - 1] + 1) last.push(i); else out.push([i]);
+  }
+  return out;
+}
+
+function updateRedactions() {
+  for (const w of S.words) if (w) w.el.classList.toggle("red", S.red.has(w.i));
+  const list = $("redList");
+  list.innerHTML = "";
+  const rs = runs();
+  for (const run of rs) {
+    const first = S.words[run[0]], last = S.words[run[run.length - 1]];
+    const li = document.createElement("li");
+    const t = document.createElement("span"); t.className = "t";
+    t.textContent = first.s != null ? fmt(first.s) + "–" + fmt(last.e) : "#" + run[0];
+    const txt = document.createElement("span"); txt.className = "txt";
+    txt.textContent = run.map((i) => S.words[i].t).join(" ");
+    const x = document.createElement("button"); x.className = "x"; x.textContent = "✕"; x.title = "Remove redaction";
+    x.onclick = (e) => { e.stopPropagation(); change(run, false); };
+    li.append(t, txt, x);
+    li.onclick = () => { jumpTo(first); first.el.scrollIntoView({ block: "center", behavior: "smooth" }); };
+    list.appendChild(li);
+  }
+  $("redCount").textContent = S.red.size;
+  $("undoBtn").disabled = !S.undo.length;
+  $("redoBtn").disabled = !S.redo.length;
+  persist();
+}
+
+function jumpTo(w) {
+  w.el.classList.remove("flash"); void w.el.offsetWidth; w.el.classList.add("flash");
+  if (S.player && w.s != null) S.player.currentTime = Math.max(0, w.s - 0.3);
+}
+
+// ---------------------------------------------------- Player linkage ----
+function wordAt(t) {
+  let lo = 0, hi = S.words.length - 1, ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1, w = S.words[mid];
+    if (w.s == null) return -1;
+    if (w.s <= t) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  return ans >= 0 && t <= S.words[ans].e + 0.05 ? ans : -1;
+}
+
+function inRedaction(t) {
+  const pb = +$("padBefore").value || 0, pa = +$("padAfter").value || 0;
+  for (const i of S.red) { const w = S.words[i]; if (w.s != null && t >= w.s - pb && t <= w.e + pa) return true; }
+  return false;
+}
+
+function tick() {
+  const p = S.player;
+  if (p && !p.paused && S.words.length) {
+    const t = p.currentTime, k = wordAt(t);
+    if (k !== S.nowIdx) {
+      S.words[S.nowIdx]?.el.classList.remove("now");
+      S.nowIdx = k;
+      if (k >= 0) S.words[k].el.classList.add("now");
+    }
+    if (!p.dataset.output) p.muted = $("previewMute").checked && inRedaction(t);
+  }
+  requestAnimationFrame(tick);
+}
+
+// ------------------------------------------------------------ Events ----
+function positionFloat() {
+  const fb = $("floatBtn"), sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !selectedIndices().length) { fb.hidden = true; return; }
+  const r = sel.getRangeAt(0).getBoundingClientRect();
+  const host = $("editor").parentElement.getBoundingClientRect();
+  fb.style.left = Math.max(8, r.left - host.left + r.width / 2 - 30) + "px";
+  fb.style.top = (r.top - host.top - 30) + "px";
+  fb.hidden = false;
+}
+
+function redactSelection(on = true) {
+  const idx = selectedIndices();
+  if (!idx.length) return;
+  change(idx, on);
+  window.getSelection().removeAllRanges();
+  $("floatBtn").hidden = true;
+}
+
+document.addEventListener("selectionchange", () => requestAnimationFrame(positionFloat));
+$("floatBtn").addEventListener("mousedown", (e) => { e.preventDefault(); redactSelection(true); });
+$("redactBtn").onclick = () => redactSelection(true);
+$("unredactBtn").onclick = () => redactSelection(false);
+$("undoBtn").onclick = undo;
+$("redoBtn").onclick = redo;
+
+$("editor").addEventListener("click", (e) => {
+  const sel = window.getSelection();
+  if (sel && !sel.isCollapsed) return;
+  const el = e.target.closest(".w");
+  if (el) jumpTo(S.words[+el.dataset.i]);
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && S.picking) { setPicking(false); return; }
+  if (e.target.matches("input, select, textarea")) return;
+  const k = e.key.toLowerCase();
+  if ((e.ctrlKey || e.metaKey) && k === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+  if ((e.ctrlKey || e.metaKey) && k === "y") { e.preventDefault(); redo(); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (k === "r") { e.preventDefault(); redactSelection(true); }
+  else if (k === "u") { e.preventDefault(); redactSelection(false); }
+  else if (k === " " && S.player && e.target === document.body) { e.preventDefault(); S.player.paused ? S.player.play() : S.player.pause(); }
+});
+
+$("openForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    applyState(await api("/api/open", {
+      media: $("mediaPath").value.trim(), transcript: $("transcriptPath").value.trim(),
+      out_root: $("outRoot").value.trim(),
+    }));
+  } catch (err) { alert(err.message); }
+});
+
+$("transcribeBtn").onclick = async () => {
+  try {
+    if (!S.state?.media) {
+      applyState(await api("/api/open", { media: $("mediaPath").value.trim(), out_root: $("outRoot").value.trim() }));
+    }
+    const { job } = await api("/api/transcribe", {});
+    $("result").hidden = true;
+    await pollJob(job, async () => applyState(await api("/api/state")));
+  } catch (err) { showError(err); }
+};
+
+$("findForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const q = $("findInput").value.trim(); if (!q) return;
+  try {
+    const { indices } = await api("/api/find", { query: q });
+    const n = change(indices, true);
+    $("findInput").value = "";
+    $("findInput").placeholder = indices.length ? `${n} word(s) redacted for “${q}”` : `No matches for “${q}”`;
+  } catch (err) { alert(err.message); }
+});
+
+$("exportBtn").onclick = async () => {
+  const btn = $("exportBtn");
+  btn.disabled = true; $("result").hidden = true;
+  try {
+    const { job } = await api("/api/export", {
+      redacted: [...S.red],
+      options: {
+        pad_before: +$("padBefore").value, pad_after: +$("padAfter").value,
+        blur_mode: $("blurMode").value, failsafe: $("failsafe").checked,
+        speaker_picks: S.picks.map(({ t, x, y }) => ({ t, x, y })),
+      },
+    });
+    await pollJob(job, showResult);
+  } catch (err) { showError(err); }
+  btn.disabled = false;
+};
+
+function showResult(res) {
+  const r = $("result"); r.hidden = false; r.innerHTML = "";
+  const ok = document.createElement("div"); ok.className = "ok";
+  ok.textContent = "✓ Export complete — originals verified unchanged"; r.appendChild(ok);
+  for (const [k, v] of Object.entries(res.outputs)) {
+    const d = document.createElement("div"); d.textContent = k;
+    const c = document.createElement("code"); c.textContent = v; d.appendChild(c); r.appendChild(d);
+  }
+  if (res.stats && res.stats.frames) {
+    const s = document.createElement("div"); s.className = "muted";
+    s.textContent = `Blurred ${res.stats.frames} frames (${res.stats.face_frames} by face, ${res.stats.fullframe_frames} full-frame) · detector: ${res.stats.detector}`;
+    r.appendChild(s);
+  }
+  if (res.outputs.media) {
+    const b = document.createElement("button"); b.className = "secondary"; b.style.marginTop = "6px";
+    b.textContent = "Review redacted output in player";
+    b.onclick = () => {
+      const isVid = /\.mp4$/i.test(res.outputs.media);
+      setupPlayer("/output-media", { has_video: isVid }, "REDACTED OUTPUT");
+      S.player.dataset.output = "1"; S.player.muted = false;
+    };
+    r.appendChild(b);
+  }
+}
+function showError(err) {
+  const r = $("result"); r.hidden = false; r.innerHTML = "";
+  const d = document.createElement("div"); d.className = "err"; d.textContent = "✕ " + err.message; r.appendChild(d);
+}
+
+// ------------------------------------------------------------- Start ----
+api("/api/state").then(applyState).catch(() => {});
+requestAnimationFrame(tick);

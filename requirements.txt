@@ -1,0 +1,5 @@
+# All open source, all run locally. Versions pinned to the set tested together.
+numpy==2.5.5
+opencv-python-headless==4.14.0.94   # 4.x ships the Haar face cascades used as fallback
+imageio-ffmpeg==0.8.1               # bundled static ffmpeg (macOS, Linux, Windows) - no Homebrew needed
+faster-whisper==1.2.1               # local transcription ("Transcribe locally")
