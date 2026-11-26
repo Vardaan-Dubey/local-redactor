@@ -9,7 +9,11 @@ const S = {
   undo: [], redo: [],
   player: null,
   nowIdx: -1,
+  view: "redacted",   // "original" | "redacted"
+  src: null,          // "/media" or "/output-media" (what the player is showing)
+  autoMuted: false,
 };
+try { if (localStorage.getItem("view") === "original") S.view = "original"; } catch (_) {}
 
 // ---------------------------------------------------------------- API ----
 async function api(path, body) {
@@ -61,24 +65,87 @@ function applyState(st) {
   $("mediaPath").value = st.media || "";
   $("transcriptPath").value = st.transcript_path || "";
   $("outRoot").value = st.out_root || "";
-  setupPlayer("/media", st.media_info, st.media ? st.media.split(/[\\/]/).pop() : "");
-  renderTranscript(st.transcript);
+  S.applying = true;  // refreshView waits until player, picks and redactions are all loaded
+  try { setupPlayer(st.media_info); renderTranscript(st.transcript); } finally { S.applying = false; }
+  refreshView();
 }
 
-function setupPlayer(src, info, label) {
+function setupPlayer(info) {
   const v = $("player"), a = $("aplayer");
   v.hidden = a.hidden = true; v.removeAttribute("src"); a.removeAttribute("src");
   delete v.dataset.output; delete a.dataset.output; v.muted = a.muted = false;
-  S.player = null;
+  $("videoBox").classList.remove("preview-blur");
+  S.player = null; S.src = null; S.autoMuted = false;
   if (!info) { $("speakerPanel").hidden = true; S.picks = []; renderPicks(); return; }
   S.player = info.has_video ? v : a;
   S.player.hidden = false;
-  S.player.src = src + "?v=" + Date.now();
-  $("playerLabel").textContent = label;
+  loadSource("/media");
   setPicking(false);
   $("speakerPanel").hidden = !info.has_video;
-  if (src === "/media") { S.picks = restorePicks(); renderPicks(); }
+  S.picks = restorePicks(); renderPicks();
 }
+
+// Swap what the player shows, keeping the playback position.
+function loadSource(src) {
+  const p = S.player;
+  if (!p || S.src === src) return;
+  const t = S.src ? p.currentTime : 0, playing = S.src && !p.paused;
+  S.src = src;
+  if (src === "/output-media") { p.dataset.output = "1"; setPicking(false); } else delete p.dataset.output;
+  p.muted = S.autoMuted = false;
+  $("videoBox").classList.remove("preview-blur");
+  p.src = src + "?v=" + Date.now();
+  if (t || playing) {
+    p.addEventListener("loadedmetadata", () => {
+      p.currentTime = Math.min(t, p.duration || t);
+      if (playing) p.play().catch(() => {});
+    }, { once: true });
+  }
+  drawPickDots();
+}
+
+// ------------------------------------------------- Original / Redacted ----
+function currentOptions() {
+  return {
+    pad_before: +$("padBefore").value, pad_after: +$("padAfter").value,
+    blur_mode: $("blurMode").value, failsafe: $("failsafe").checked,
+    speaker_picks: S.picks.map(({ t, x, y }) => ({ t, x, y })),
+  };
+}
+
+// The exported file is shown only while it still matches what's marked now.
+function exportIsCurrent() {
+  const ex = S.state?.last_export;
+  if (!ex || !ex.has_media) return false;
+  const now = [...S.red].sort((a, b) => a - b);
+  return JSON.stringify(ex.redacted) === JSON.stringify(now) &&
+    JSON.stringify(ex.options) === JSON.stringify(currentOptions());
+}
+
+function setView(v) {
+  S.view = v;
+  try { localStorage.setItem("view", v); } catch (_) {}
+  refreshView();
+}
+
+function refreshView() {
+  const red = S.view === "redacted";
+  $("viewOriginal").setAttribute("aria-pressed", String(!red));
+  $("viewRedacted").setAttribute("aria-pressed", String(red));
+  $("editor").classList.toggle("show-original", !red);
+  if (!S.state || S.applying) return;
+  const name = S.state.media ? S.state.media.split(/[\\/]/).pop() : "";
+  const exported = red && exportIsCurrent();
+  if (S.player) loadSource(exported ? "/output-media" : "/media");
+  $("playerLabel").textContent = !red ? name
+    : exported ? "Exported redacted copy"
+    : S.red.size ? "Preview · exact result after export" : "Nothing redacted yet";
+  $("playerLabel").title = !red ? (S.state.media || "") : "";
+}
+
+$("viewOriginal").onclick = () => setView("original");
+$("viewRedacted").onclick = () => setView("redacted");
+["padBefore", "padAfter", "blurMode", "failsafe"].forEach((id) => $(id).addEventListener("change", refreshView));
 
 // ------------------------------------------------------ Speaker picks ----
 // A pick is {t, x, y}: a moment in the video and a point on the speaker's face
@@ -145,6 +212,7 @@ function renderPicks() {
   }
   $("pickCount").textContent = S.picks.length;
   drawPickDots();
+  refreshView();
 }
 
 $("pickBtn").onclick = () => setPicking(!S.picking);
@@ -281,6 +349,7 @@ function updateRedactions() {
   $("undoBtn").disabled = !S.undo.length;
   $("redoBtn").disabled = !S.redo.length;
   persist();
+  refreshView();
 }
 
 function jumpTo(w) {
@@ -299,8 +368,8 @@ function wordAt(t) {
   return ans >= 0 && t <= S.words[ans].e + 0.05 ? ans : -1;
 }
 
-function inRedaction(t) {
-  const pb = +$("padBefore").value || 0, pa = +$("padAfter").value || 0;
+function inRedaction(t, extra = 0) {
+  const pb = (+$("padBefore").value || 0) + extra, pa = (+$("padAfter").value || 0) + extra;
   for (const i of S.red) { const w = S.words[i]; if (w.s != null && t >= w.s - pb && t <= w.e + pa) return true; }
   return false;
 }
@@ -314,7 +383,14 @@ function tick() {
       S.nowIdx = k;
       if (k >= 0) S.words[k].el.classList.add("now");
     }
-    if (!p.dataset.output) p.muted = $("previewMute").checked && inRedaction(t);
+  }
+  // Redacted view before export: mute, and blur the frame, during redacted words.
+  // Only flip mute when it changes, so the player's own mute button still works.
+  if (p && S.src === "/media") {
+    const live = S.view === "redacted" && S.red.size > 0;
+    const mute = live && inRedaction(p.currentTime);
+    if (mute !== S.autoMuted) { p.muted = mute; S.autoMuted = mute; }
+    $("videoBox").classList.toggle("preview-blur", live && p === $("player") && inRedaction(p.currentTime, 0.25));
   }
   requestAnimationFrame(tick);
 }
@@ -361,6 +437,7 @@ document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (k === "r") { e.preventDefault(); redactSelection(true); }
   else if (k === "u") { e.preventDefault(); redactSelection(false); }
+  else if (k === "v") { e.preventDefault(); setView(S.view === "redacted" ? "original" : "redacted"); }
   else if (k === " " && S.player && e.target === document.body) { e.preventDefault(); S.player.paused ? S.player.play() : S.player.pause(); }
 });
 
@@ -429,13 +506,13 @@ $("exportBtn").onclick = async () => {
   try {
     const { job } = await api("/api/export", {
       redacted: [...S.red],
-      options: {
-        pad_before: +$("padBefore").value, pad_after: +$("padAfter").value,
-        blur_mode: $("blurMode").value, failsafe: $("failsafe").checked,
-        speaker_picks: S.picks.map(({ t, x, y }) => ({ t, x, y })),
-      },
+      options: currentOptions(),
     });
-    await pollJob(job, showResult);
+    await pollJob(job, async (res) => {
+      S.state.last_export = (await api("/api/state")).last_export;
+      showResult(res);
+      refreshView();
+    });
   } catch (err) { showError(err); }
   btn.disabled = false;
 };
@@ -455,12 +532,8 @@ function showResult(res) {
   }
   if (res.outputs.media) {
     const b = document.createElement("button"); b.className = "secondary"; b.style.marginTop = "6px";
-    b.textContent = "Review redacted output in player";
-    b.onclick = () => {
-      const isVid = /\.mp4$/i.test(res.outputs.media);
-      setupPlayer("/output-media", { has_video: isVid }, "REDACTED OUTPUT");
-      S.player.dataset.output = "1"; S.player.muted = false;
-    };
+    b.textContent = "Watch the redacted copy";
+    b.onclick = () => setView("redacted");
     r.appendChild(b);
   }
 }
@@ -470,5 +543,6 @@ function showError(err) {
 }
 
 // ------------------------------------------------------------- Start ----
+refreshView();
 api("/api/state").then(applyState).catch(() => {});
 requestAnimationFrame(tick);

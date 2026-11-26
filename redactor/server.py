@@ -37,6 +37,7 @@ class State:
         self.media_info: dict | None = None
         self.transcript = None
         self.out_root: Path | None = None
+        self.last_export: dict | None = None  # what the latest export of these files redacted
         self.jobs: dict[str, dict] = {}
         self.lock = threading.Lock()
 
@@ -49,8 +50,11 @@ class State:
             raise FileNotFoundError(f"Transcript not found: {transcript}")
         if not media and not transcript:
             raise ValueError("Provide a media file and/or a transcript")
-        if media != self.media:
-            self.cfg.pop("last_output_media", None)  # that export belongs to the old file
+        old_transcript = self.transcript.source_path if self.transcript else None
+        if media != self.media or transcript != old_transcript:
+            # An earlier export belongs to the previous files.
+            self.cfg.pop("last_output_media", None)
+            self.last_export = None
         self.media = media
         self.media_info = M.probe(media).to_dict() if media else None
         self.transcript = load_transcript(transcript) if transcript else None
@@ -64,6 +68,7 @@ class State:
             "transcript": self.transcript.to_ui() if self.transcript else None,
             "out_root": str(self.out_root) if self.out_root else None,
             "whisper_model": self.cfg.get("whisper_model"),
+            "last_export": self.last_export,
         }
 
     def start_job(self, fn) -> str:
@@ -233,7 +238,11 @@ def make_handler(state: State, port: int):
 
             def job(progress):
                 res = export(tr, body.get("redacted", []), media, out_root, opts, progress)
-                state.cfg["last_output_media"] = res["outputs"].get("media")
+                if state.media == media and state.transcript is tr:  # files not switched meanwhile
+                    state.cfg["last_output_media"] = res["outputs"].get("media")
+                    state.last_export = {"redacted": sorted(body.get("redacted", [])),
+                                         "options": body.get("options") or {},
+                                         "has_media": bool(res["outputs"].get("media"))}
                 return res
 
             self._json({"job": state.start_job(job)})

@@ -49,13 +49,16 @@
 
   <aside class="side">
     <div class="player-wrap">
-      <div class="video-box">
+      <div class="video-box" id="videoBox">
         <video id="player" controls preload="metadata" hidden></video>
         <div id="pickLayer" class="pick-layer" hidden></div>
       </div>
       <audio id="aplayer" controls preload="metadata" hidden></audio>
       <div class="player-opts">
-        <label><input type="checkbox" id="previewMute" checked> Mute redacted parts during preview</label>
+        <div class="view-toggle" role="group" aria-label="View">
+          <button type="button" id="viewOriginal" data-view="original" title="Unredacted: original media, redacted words readable (V switches)">Original</button>
+          <button type="button" id="viewRedacted" data-view="redacted" title="As it will be exported: muted, blurred, words blacked out (V switches)">Redacted</button>
+        </div>
         <span id="playerLabel" class="muted"></span>
       </div>
     </div>
