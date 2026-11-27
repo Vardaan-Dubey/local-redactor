@@ -62,12 +62,12 @@ function applyState(st) {
     $("playerLabel").textContent = "";
   }
   S.state = st;
-  // Remembered so the same files reopen after the server restarts (it restarts
-  // itself when the app's code changes) - then a page refresh is all it takes.
+  // Remembered so the same files reopen when the server restarts itself after a
+  // code change (same launch). A fresh launch of the app starts blank.
   if (st.media || st.transcript_path) {
     try {
-      localStorage.setItem("lastOpen", JSON.stringify(
-        { media: st.media, transcript: st.transcript_path, out_root: st.out_root }));
+      localStorage.setItem("lastOpen", JSON.stringify({ session: st.session,
+        files: { media: st.media, transcript: st.transcript_path, out_root: st.out_root } }));
     } catch (_) {}
   }
   $("mediaPath").value = st.media || "";
@@ -166,6 +166,7 @@ function refreshView() {
         : "") + "The preview can't find faces, so it blurs the whole frame. Export to get the face-only blur.";
     }
   }
+  if (!S.state.media && !S.state.transcript_path) label = tip = "";  // nothing open
   $("playerLabel").textContent = label;
   $("playerLabel").title = tip;
 }
@@ -576,8 +577,8 @@ refreshView();
   if (!st.media && !st.transcript_path) {
     let last = null;
     try { last = JSON.parse(localStorage.getItem("lastOpen") || "null"); } catch (_) {}
-    if (last) {
-      try { st = await api("/api/open", last); }
+    if (last?.session && last.session === st.session) {
+      try { st = await api("/api/open", last.files); }
       catch (_) { try { localStorage.removeItem("lastOpen"); } catch (_) {} }  // moved or deleted
     }
   }

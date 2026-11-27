@@ -37,7 +37,7 @@ The **first start** sets everything up and needs internet once. It takes a few m
 
 No admin rights, Homebrew, sudo or winget are needed, and nothing is installed system-wide. **Later starts run fully offline.** The editor opens in your browser at http://127.0.0.1:8765. Keep the terminal window open while you use it; closing it stops the editor.
 
-You don't need to restart after an update. When the app's code changes (after a `git pull`, for example), the editor restarts itself within a second or two. **Refresh the page** and the same files reopen. Starting it a second time just opens the copy that's already running. To turn the automatic restart off, start it with `--no-reload`.
+You don't need to restart after an update. When the app's code changes (after a `git pull`, for example), the editor restarts itself within a second or two. **Refresh the page** and the same files reopen. (A fresh start of the app always opens blank.) Starting it a second time just opens the copy that's already running. To turn the automatic restart off, start it with `--no-reload`.
 
 For more accurate transcription, set `WHISPER_MODEL=large-v3` before the first start (about 3 GB).
 

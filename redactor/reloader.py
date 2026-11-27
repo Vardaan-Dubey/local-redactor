@@ -15,10 +15,14 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 PKG = Path(__file__).resolve().parent
 CHILD_ENV = "REDACTOR_SERVER_CHILD"
+# One ID per launch of the app, kept across automatic restarts. The page uses it
+# to reopen files after a code-change restart but start blank on a fresh launch.
+SESSION_ENV = "REDACTOR_SESSION"
 
 
 def is_child() -> bool:
@@ -47,7 +51,7 @@ def _stop(child: subprocess.Popen) -> None:
 
 def supervise(argv: list[str]) -> int:
     """Run `python -m redactor <argv>` and restart it whenever the code changes."""
-    env = dict(os.environ, **{CHILD_ENV: "1"})
+    env = dict(os.environ, **{CHILD_ENV: "1", SESSION_ENV: uuid.uuid4().hex})
     restarted = False
     while True:
         # Only the first start opens a browser tab; after that, refreshing is enough.

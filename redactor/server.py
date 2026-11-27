@@ -25,6 +25,8 @@ from .export import default_output_root, export
 from .transcript import find_phrase, load_transcript
 
 STATIC = Path(__file__).resolve().parent / "static"
+# Same for the whole launch, even across automatic restarts (see reloader.py).
+SESSION = os.environ.get("REDACTOR_SESSION") or uuid.uuid4().hex
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "media-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; "
        "frame-ancestors 'none'")
@@ -99,6 +101,7 @@ class State:
             "exports": [{k: e[k] for k in ("id", "created", "redacted", "options")}
                         | {"has_media": bool(e["media_out"])} for e in self.exports],
             "media_is_export": self.media_is_export(),
+            "session": SESSION,
         }
 
     def start_job(self, fn) -> str:
