@@ -50,9 +50,19 @@
 
   <aside class="side">
     <div class="player-wrap">
-      <div class="video-box" id="videoBox">
-        <video id="player" controls preload="metadata" hidden></video>
-        <div id="pickLayer" class="pick-layer" hidden></div>
+      <div class="video-stage" id="videoStage">
+        <div class="video-box" id="videoBox">
+          <video id="player" preload="metadata" playsinline hidden></video>
+          <canvas id="blurCanvas" class="blur-canvas" aria-hidden="true"></canvas>
+          <div id="pickLayer" class="pick-layer" hidden></div>
+        </div>
+        <div id="vControls" class="vcontrols" hidden>
+          <button type="button" id="vPlay" class="vbtn"></button>
+          <span id="vTime" class="vtime">0:00 / 0:00</span>
+          <input type="range" id="vSeek" min="0" max="1000" value="0" aria-label="Seek">
+          <button type="button" id="vMute" class="vbtn"></button>
+          <button type="button" id="vFull" class="vbtn" aria-label="Full screen" title="Full screen"></button>
+        </div>
       </div>
       <audio id="aplayer" controls preload="metadata" hidden></audio>
       <div class="player-opts">

@@ -54,12 +54,51 @@ def default_output_root(media: str | None, transcript: str | None) -> Path:
     return ref.parent / f"{ref.stem}_redacted"
 
 
-def export(transcript: Transcript, redacted: list[int], media_path: str | None,
-           out_root: str | Path, options: dict, progress: Progress = lambda f, m: None) -> dict:
-    opts = {"pad_before": 0.10, "pad_after": 0.15, "merge_gap": 0.25,
+DEFAULTS = {"pad_before": 0.10, "pad_after": 0.15, "merge_gap": 0.25,
             "blur_mode": "speaker", "failsafe": True, "blur_pad": 0.25,
             "detect_every": 1, "yunet_model": None}
+
+
+def merged_options(options: dict | None) -> dict:
+    opts = dict(DEFAULTS)
     opts.update({k: v for k, v in (options or {}).items() if v is not None})
+    return opts
+
+
+def redaction_spans(transcript: Transcript, red: list[int], duration: float, opts: dict):
+    """(mute spans, blur spans) in seconds for the redacted word indices."""
+    words = transcript.words
+    times = [(words[i].start, words[i].end) for i in red]
+    spans = M.compute_spans(times, opts["pad_before"], opts["pad_after"],
+                            opts["merge_gap"], duration)
+    blur_spans = M.compute_spans(times, opts["pad_before"] + opts["blur_pad"],
+                                 opts["pad_after"] + opts["blur_pad"],
+                                 opts["merge_gap"], duration)
+    return spans, blur_spans
+
+
+def preview(transcript: Transcript, redacted: list[int], media_path: str, options: dict,
+            progress: Progress = lambda f, m: None, cancelled=lambda: False) -> dict:
+    """What an export with these marks and settings would mute and blur, without
+    writing anything: mute spans, blur spans and the per-frame blur regions."""
+    opts = merged_options(options)
+    if not transcript.timed:
+        raise RuntimeError("Transcript has no timings, so media cannot be aligned.")
+    red = sorted(i for i in set(int(i) for i in redacted) if 0 <= i < len(transcript.words))
+    info = M.probe(media_path)
+    spans, blur_spans = redaction_spans(transcript, red, info.duration, opts)
+    frames = []
+    if info.has_video and blur_spans:
+        blurrer = M.FaceBlurrer(opts["blur_mode"], bool(opts["failsafe"]),
+                                detect_every=int(opts["detect_every"]),
+                                yunet_model=opts["yunet_model"], picks=opts.get("speaker_picks"))
+        frames = M.preview_regions(media_path, info, blur_spans, blurrer, progress, cancelled)
+    return {"spans": spans, "blur_spans": blur_spans, "fps": float(info.fps), "frames": frames}
+
+
+def export(transcript: Transcript, redacted: list[int], media_path: str | None,
+           out_root: str | Path, options: dict, progress: Progress = lambda f, m: None) -> dict:
+    opts = merged_options(options)
 
     sources = [Path(transcript.source_path)] + ([Path(media_path)] if media_path else [])
     for s in sources:
@@ -97,12 +136,7 @@ def export(transcript: Transcript, redacted: list[int], media_path: str | None,
             raise RuntimeError("Transcript has no timings, so media cannot be aligned. "
                                "Use an SRT/VTT/JSON transcript or run local transcription.")
         info = M.probe(media_path)
-        times = [(words[i].start, words[i].end) for i in red]
-        spans = M.compute_spans(times, opts["pad_before"], opts["pad_after"],
-                                opts["merge_gap"], info.duration)
-        blur_spans = M.compute_spans(times, opts["pad_before"] + opts["blur_pad"],
-                                     opts["pad_after"] + opts["blur_pad"],
-                                     opts["merge_gap"], info.duration)
+        spans, blur_spans = redaction_spans(transcript, red, info.duration, opts)
         src = Path(media_path)
         sub = lambda f, m: progress(0.05 + 0.9 * f, m)
         if info.has_video:

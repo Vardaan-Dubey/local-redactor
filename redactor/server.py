@@ -21,7 +21,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import media as M
-from .export import default_output_root, export
+from .export import default_output_root, export, preview
 from .transcript import find_phrase, load_transcript
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -41,6 +41,7 @@ class State:
         self.out_root: Path | None = None
         self.exports: list[dict] = []  # the export shown in the Redacted view (chosen or just made)
         self.jobs: dict[str, dict] = {}
+        self.preview_gen = 0  # bumped per preview request; older preview jobs stop
         self.lock = threading.Lock()
 
     def open(self, media: str | None, transcript: str | None, out_root: str | None = None):
@@ -140,6 +141,10 @@ class State:
         job = {"id": jid, "status": "running", "progress": 0.0, "message": "Starting",
                "result": None, "error": None}
         self.jobs[jid] = job
+        # Keep only recent finished jobs (preview results can be sizeable).
+        done = [k for k, j in self.jobs.items() if j["status"] != "running"]
+        for k in done[:-20]:
+            self.jobs.pop(k, None)
 
         def progress(f, m):
             job["progress"], job["message"] = round(float(f), 4), m
@@ -149,7 +154,8 @@ class State:
                 job["result"] = fn(progress)
                 job["status"] = "done"
             except Exception as e:  # surfaced to the UI
-                traceback.print_exc()
+                if str(e) != "cancelled":  # a newer preview replaced this one
+                    traceback.print_exc()
                 job["status"], job["error"] = "error", str(e)
 
         threading.Thread(target=run, daemon=True).start()
@@ -287,6 +293,8 @@ def make_handler(state: State, port: int):
                     return self._export(body)
                 if path == "/api/transcribe":
                     return self._transcribe(body)
+                if path == "/api/preview":
+                    return self._preview(body)
                 if path == "/api/open-export":
                     found = state.open_export(body.get("folder") or "")
                     return self._json({"state": state.snapshot(), "originals_found": found})
@@ -310,6 +318,23 @@ def make_handler(state: State, port: int):
                     ex = state.read_export(Path(res["out_dir"]))
                     state.exports = [ex] if ex else []
                 return res
+
+            self._json({"job": state.start_job(job)})
+
+        def _preview(self, body):
+            """Face regions and mute spans an export would use, for the live preview."""
+            if not (state.transcript and state.media and state.media_info):
+                raise ValueError("Open a video and transcript first")
+            tr, media = state.transcript, state.media
+            opts = dict(body.get("options") or {})
+            opts["yunet_model"] = state.cfg.get("yunet_model")
+            with state.lock:
+                state.preview_gen += 1
+                gen = state.preview_gen
+            stale = lambda: state.preview_gen != gen or state.transcript is not tr
+
+            def job(progress):
+                return preview(tr, body.get("redacted", []), media, opts, progress, stale)
 
             self._json({"job": state.start_job(job)})
 

@@ -314,12 +314,18 @@ class FaceBlurrer:
 
     def __call__(self, frame: np.ndarray, t: float) -> None:
         """Called for frames inside a redaction span: obscure them."""
+        for box in self.regions(frame, t):
+            obscure(frame, *box)
+
+    def regions(self, frame: np.ndarray, t: float) -> list[tuple[int, int, int, int]]:
+        """For a frame inside a redaction span, the (x0, y0, x1, y1) pixel boxes to
+        obscure - the whole frame is one full-size box. Doesn't change the frame,
+        so the editor's preview can show exactly what the export will blur."""
         h, w = frame.shape[:2]
         self.stats["frames"] += 1
         if self.mode == "frame":
-            obscure(frame, 0, 0, w, h)
             self.stats["fullframe_frames"] += 1
-            return
+            return [(0, 0, w, h)]
         if not self.picks and self.last_t is not None and t - self.last_t > 0.5:
             # New span with no user pick: the shot may have changed, start over.
             self.speaker, self.recent = None, []
@@ -341,12 +347,11 @@ class FaceBlurrer:
         self.recent = [(b, ts) for b, ts in self.recent if t - ts <= self.hold]
         if not self.recent:
             if self.failsafe:  # speaker not found: never leave them exposed
-                obscure(frame, 0, 0, w, h)
                 self.stats["fullframe_frames"] += 1
-            return
-        for b, _ in self.recent:
-            obscure(frame, *_expand(b, w, h))
+                return [(0, 0, w, h)]
+            return []
         self.stats["face_frames"] += 1
+        return [_expand(b, w, h) for b, _ in self.recent]
 
     def observe(self, frame: np.ndarray, t: float) -> None:
         """Called for frames outside redaction spans (not modified). With a user
@@ -447,6 +452,51 @@ def redact_audio_only(src: str, dst: str, spans, progress: Progress) -> None:
     progress(1.0, "Audio done")
 
 
+def _decode_frames(src: str, info: MediaInfo) -> subprocess.Popen:
+    fps = info.fps
+    return subprocess.Popen(
+        [ffmpeg_exe(), "-nostdin", "-v", "error", "-i", src, "-map", "0:v:0", "-an", "-sn",
+         "-r", f"{fps.numerator}/{fps.denominator}", "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+
+def preview_regions(src: str, info: MediaInfo, blur_spans, blurrer: FaceBlurrer,
+                    progress: Progress, cancelled=lambda: False) -> list:
+    """The same frame loop as redact_video, without writing a video: for each
+    frame inside a blur span, the regions the export would obscure, as
+    [t, [[x0, y0, x1, y1], ...]] with coordinates as fractions of the frame."""
+    w, h, fps = info.width, info.height, info.fps
+    frame_bytes = w * h * 3
+    total = max(1, int(info.duration * float(fps)))
+    in_blur = _SpanLookup(blur_spans)
+    dec = _decode_frames(src, info)
+    out, i = [], 0
+    try:
+        while True:
+            if cancelled():
+                raise RuntimeError("cancelled")
+            buf = dec.stdout.read(frame_bytes)
+            if len(buf) < frame_bytes:
+                break
+            t = i / float(fps)
+            frame = np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+            if in_blur(t):
+                boxes = blurrer.regions(frame, t)
+                out.append([round(t, 4), [[round(x0 / w, 4), round(y0 / h, 4), round(x1 / w, 4),
+                                           round(y1 / h, 4)] for x0, y0, x1, y1 in boxes]])
+            else:
+                blurrer.observe(frame, t)
+            i += 1
+            if i % 30 == 0:
+                progress(min(0.99, i / total), f"Finding faces {i}/{total}")
+    finally:
+        if dec.poll() is None:
+            dec.kill()
+        dec.stdout.close()
+        dec.wait()
+    return out
+
+
 def redact_video(src: str, dst: str, info: MediaInfo, spans, blur_spans, blurrer: FaceBlurrer,
                  progress: Progress) -> None:
     w, h, fps = info.width, info.height, info.fps
@@ -454,10 +504,7 @@ def redact_video(src: str, dst: str, info: MediaInfo, spans, blur_spans, blurrer
     total = max(1, int(info.duration * float(fps)))
     in_blur = _SpanLookup(blur_spans)
 
-    dec = subprocess.Popen(
-        [ffmpeg_exe(), "-nostdin", "-v", "error", "-i", src, "-map", "0:v:0", "-an", "-sn",
-         "-r", f"{fps.numerator}/{fps.denominator}", "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    dec = _decode_frames(src, info)
 
     enc_err = tempfile.TemporaryFile()
     enc_cmd = [ffmpeg_exe(), "-nostdin", "-v", "error", "-y",

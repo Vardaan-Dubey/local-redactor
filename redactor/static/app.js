@@ -11,7 +11,10 @@ const S = {
   nowIdx: -1,
   view: "redacted",   // "original" | "redacted"
   src: null,          // "/media" or "/output-media?id=<export folder>" (what the player shows)
-  autoMuted: false,
+  autoMuted: false,   // muted by the Redacted preview during a redacted word
+  userMuted: false,   // muted with the player's mute button
+  pv: { key: null, status: "idle" },  // face-blur preview from the server (see runPreview)
+  curKey: null,
 };
 try { if (localStorage.getItem("view") === "original") S.view = "original"; } catch (_) {}
 
@@ -82,8 +85,9 @@ function setupPlayer(info) {
   const v = $("player"), a = $("aplayer");
   v.hidden = a.hidden = true; v.removeAttribute("src"); a.removeAttribute("src");
   delete v.dataset.output; delete a.dataset.output; v.muted = a.muted = false;
-  $("videoBox").classList.remove("preview-blur");
   S.player = null; S.src = null; S.autoMuted = false;
+  $("vControls").hidden = !info?.has_video;
+  drawBlur([]);
   if (!info) { $("speakerPanel").hidden = true; S.picks = []; renderPicks(); return; }
   S.player = info.has_video ? v : a;
   S.player.hidden = false;
@@ -100,8 +104,8 @@ function loadSource(src) {
   const t = S.src ? p.currentTime : 0, playing = S.src && !p.paused;
   S.src = src;
   if (src.startsWith("/output-media")) { p.dataset.output = "1"; setPicking(false); } else delete p.dataset.output;
-  p.muted = S.autoMuted = false;
-  $("videoBox").classList.remove("preview-blur");
+  S.autoMuted = false; applyMute();
+  drawBlur([]);
   p.src = src + (src.includes("?") ? "&" : "?") + "v=" + Date.now();
   if (t || playing) {
     p.addEventListener("loadedmetadata", () => {
@@ -128,11 +132,97 @@ function sameSettings(o) {
   return JSON.stringify([+o.pad_before, +o.pad_after, o.blur_mode, !!o.failsafe,
     (o.speaker_picks || []).map((p) => [+p.t, +p.x, +p.y])]);
 }
-function matchingExport() {
-  const now = JSON.stringify([...S.red].sort((a, b) => a - b));
-  const opts = sameSettings(currentOptions());
-  return (S.state?.exports || []).find((e) => e.has_media &&
-    JSON.stringify([...e.redacted].sort((a, b) => a - b)) === now && sameSettings(e.options) === opts);
+// The export chosen with "Open export…" (or just made). The Redacted view always
+// plays it; the label notes when the marks have changed since.
+function chosenExport() {
+  return (S.state?.exports || []).find((e) => e.has_media) || null;
+}
+function exportMatches(e) {
+  return JSON.stringify([...e.redacted].sort((a, b) => a - b)) ===
+    JSON.stringify([...S.red].sort((a, b) => a - b)) && sameSettings(e.options) === sameSettings(currentOptions());
+}
+
+// ----------------------------------------------------- Live preview ----
+// Before an export, the Redacted view previews it. The server runs the same face
+// detection and speaker tracking as the export (without writing a video) and
+// returns the regions to blur per frame plus the exact mute spans; the page
+// blurs just those regions on a canvas over the picture.
+function previewKey() {
+  return JSON.stringify([S.state?.media, S.state?.transcript_path,
+    [...S.red].sort((a, b) => a - b), sameSettings(currentOptions())]);
+}
+function schedulePreview() {
+  if (!S.state?.media || !S.state.transcript || !S.red.size || S.pv.key === S.curKey) return;
+  const key = S.curKey;
+  S.pv = { key, status: "waiting", progress: 0 };
+  clearTimeout(S.pvTimer);
+  S.pvTimer = setTimeout(() => runPreview(key), 500);  // wait for a burst of edits to settle
+}
+async function runPreview(key) {
+  if (S.pv.key !== key) return;
+  S.pv.status = "running";
+  try {
+    const { job } = await api("/api/preview", { redacted: [...S.red], options: currentOptions() });
+    for (;;) {
+      if (S.pv.key !== key) return;  // marks changed: a newer preview is on its way
+      const j = await api("/api/job/" + job);
+      if (S.pv.key !== key) return;
+      if (j.status === "done") { Object.assign(S.pv, { status: "ready", data: j.result }); break; }
+      if (j.status === "error") throw new Error(j.error);
+      S.pv.progress = j.progress || 0;
+      refreshView();
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  } catch (err) {
+    if (S.pv.key === key) Object.assign(S.pv, { status: "error", error: err.message });
+  }
+  refreshView();
+}
+function previewData() {
+  return S.pv.status === "ready" && S.pv.key === S.curKey ? S.pv.data : null;
+}
+// What to blur at time t, as [x0, y0, x1, y1] fractions of the frame.
+function previewRegions(t) {
+  const d = previewData();
+  if (!d) return inRedaction(t, 0.25) ? [[0, 0, 1, 1]] : [];  // until faces are found: whole picture
+  const f = d.frames, half = 0.5 / d.fps;
+  let lo = 0, hi = f.length - 1, ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (f[mid][0] <= t + half) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  return ans >= 0 && t - f[ans][0] < 3 * half ? f[ans][1] : [];
+}
+function previewMuted(t) {
+  const d = previewData();
+  return d ? d.spans.some(([a, b]) => t >= a && t <= b) : inRedaction(t);
+}
+
+// Blur regions of the picture on a canvas laid over it: shrink each region and
+// scale it back up (the same idea as the export's pixelate-and-blur). Only the
+// picture is covered; the controls sit below it.
+function drawBlur(regions) {
+  const c = $("blurCanvas");
+  if (!regions.length && !S.blurDrawn) return;
+  const v = $("player"), ctx = c.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const cw = Math.round(c.clientWidth * dpr), ch = Math.round(c.clientHeight * dpr);
+  if (c.width !== cw || c.height !== ch) { c.width = cw; c.height = ch; }
+  ctx.clearRect(0, 0, c.width, c.height);
+  S.blurDrawn = false;
+  if (!regions.length || !v.videoWidth) return;
+  const vr = videoRect(), vw = v.videoWidth, vh = v.videoHeight;
+  const tiny = S.tiny || (S.tiny = document.createElement("canvas")), tctx = tiny.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  for (const [x0, y0, x1, y1] of regions) {
+    const sw = (x1 - x0) * vw, sh = (y1 - y0) * vh;
+    if (sw < 2 || sh < 2) continue;
+    tiny.width = Math.max(1, Math.round(sw / 24)); tiny.height = Math.max(1, Math.round(sh / 24));
+    tctx.drawImage(v, x0 * vw, y0 * vh, sw, sh, 0, 0, tiny.width, tiny.height);
+    ctx.drawImage(tiny, 0, 0, tiny.width, tiny.height, (vr.ox + x0 * vr.w) * dpr, (vr.oy + y0 * vr.h) * dpr,
+      (x1 - x0) * vr.w * dpr, (y1 - y0) * vr.h * dpr);
+  }
+  S.blurDrawn = true;
 }
 
 function setView(v) {
@@ -148,7 +238,10 @@ function refreshView() {
   $("editor").classList.toggle("show-original", !red);
   if (!S.state || S.applying) return;
   const name = S.state.media ? S.state.media.split(/[\\/]/).pop() : "";
-  const ex = red && !S.state.media_is_export ? matchingExport() : null;
+  S.curKey = previewKey();
+  // Work out the face preview even in the Original view, so it's ready on switching.
+  if (!S.state.media_is_export && !chosenExport()) schedulePreview();
+  const ex = red && !S.state.media_is_export ? chosenExport() : null;
   if (S.player) loadSource(ex ? "/output-media?id=" + encodeURIComponent(ex.id) : "/media");
   const when = ex?.created ? new Date(ex.created).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "";
   let label = name, tip = S.state.media || "";
@@ -157,13 +250,25 @@ function refreshView() {
     tip = "This file is an export, so it's played as is - no extra muting or blurring.";
   } else if (red) {
     tip = "";
-    if (ex) label = "Exported copy" + (when ? " · " + when : "");
-    else if (!S.red.size) label = "Nothing redacted yet";
+    if (ex) {
+      label = "Exported copy" + (when ? " · " + when : "");
+      if (!exportMatches(ex)) {
+        label += " · marks changed since";
+        tip = "Your marks or settings have changed since this export. Export again to include them.";
+      }
+    } else if (!S.red.size) label = "Nothing redacted yet";
     else {
-      label = "Preview · whole frame blurred";
-      tip = (S.state.exports?.length
-        ? "Your marks or settings differ from every export of this file. "
-        : "") + "The preview can't find faces, so it blurs the whole frame. Export to get the face-only blur.";
+      const pv = S.pv, video = S.state.media_info?.has_video;
+      if (!video || pv.status === "ready") {
+        label = "Preview";
+        tip = "Mutes and blurs exactly what an export with these marks and settings would.";
+      } else if (pv.status === "error") {
+        label = "Preview · whole frame blurred";
+        tip = "Couldn't find faces for the preview (" + pv.error + "), so it blurs the whole picture.";
+      } else {
+        label = "Preview · finding faces" + (pv.progress ? " " + Math.round(pv.progress * 100) + "%" : "…");
+        tip = "The whole picture is blurred during redactions until faces are found.";
+      }
     }
   }
   if (!S.state.media && !S.state.transcript_path) label = tip = "";  // nothing open
@@ -260,6 +365,7 @@ $("pickLayer").addEventListener("click", (e) => {
 $("player").addEventListener("timeupdate", drawPickDots);
 $("player").addEventListener("seeked", drawPickDots);
 window.addEventListener("resize", drawPickDots);
+document.addEventListener("fullscreenchange", drawPickDots);
 
 function renderTranscript(tr) {
   const ed = $("editor");
@@ -412,14 +518,13 @@ function tick() {
       if (k >= 0) S.words[k].el.classList.add("now");
     }
   }
-  // Redacted view before export: mute, and blur the frame, during redacted words.
-  // Only flip mute when it changes, so the player's own mute button still works.
-  if (p && S.src === "/media") {
-    const live = S.view === "redacted" && S.red.size > 0 && !S.state?.media_is_export;
-    const mute = live && inRedaction(p.currentTime);
-    if (mute !== S.autoMuted) { p.muted = mute; S.autoMuted = mute; }
-    $("videoBox").classList.toggle("preview-blur", live && p === $("player") && inRedaction(p.currentTime, 0.25));
+  // Redacted view before export: mute and blur what the export would.
+  const live = p && S.src === "/media" && S.view === "redacted" && S.red.size > 0 && !S.state?.media_is_export;
+  if (p) {
+    const mute = !!live && previewMuted(p.currentTime);
+    if (mute !== S.autoMuted) { S.autoMuted = mute; applyMute(); }
   }
+  drawBlur(live && p === $("player") ? previewRegions(p.currentTime) : []);
   requestAnimationFrame(tick);
 }
 
@@ -601,6 +706,51 @@ function showError(err) {
   const r = $("result"); r.hidden = false; r.innerHTML = "";
   const d = document.createElement("div"); d.className = "err"; d.textContent = "✕ " + err.message; r.appendChild(d);
 }
+
+// ---------------------------------------------------------- Controls ----
+// The video has its own control bar below the picture, so the preview blur
+// (drawn over the picture) never covers the controls.
+const ICON = {
+  play: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>',
+  pause: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5h3v11H4zM9 2.5h3v11H9z" fill="currentColor"/></svg>',
+  sound: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6h3l4-3v10L5 10H2z" fill="currentColor"/><path d="M11 5.5a3.5 3.5 0 0 1 0 5M12.5 3.5a6 6 0 0 1 0 9" stroke="currentColor" fill="none" stroke-width="1.3"/></svg>',
+  muted: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6h3l4-3v10L5 10H2z" fill="currentColor"/><path d="M11 6l4 4M15 6l-4 4" stroke="currentColor" stroke-width="1.4"/></svg>',
+  full: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" stroke="currentColor" fill="none" stroke-width="1.5"/></svg>',
+};
+function applyMute() {
+  if (S.player) S.player.muted = S.userMuted || S.autoMuted;
+  $("vMute").innerHTML = S.userMuted ? ICON.muted : ICON.sound;
+  $("vMute").setAttribute("aria-label", S.userMuted ? "Unmute" : "Mute");
+}
+function clock(t) {
+  t = isFinite(t) ? t : 0;
+  return Math.floor(t / 60) + ":" + String(Math.floor(t % 60)).padStart(2, "0");
+}
+function syncControls() {
+  const v = $("player");
+  $("vPlay").innerHTML = v.paused ? ICON.play : ICON.pause;
+  $("vPlay").setAttribute("aria-label", v.paused ? "Play" : "Pause");
+  $("vTime").textContent = clock(v.currentTime) + " / " + clock(v.duration);
+  if (!S.seeking) $("vSeek").value = v.duration ? Math.round(v.currentTime / v.duration * 1000) : 0;
+}
+["play", "pause", "timeupdate", "durationchange", "loadedmetadata", "seeked", "emptied"]
+  .forEach((ev) => $("player").addEventListener(ev, syncControls));
+$("vPlay").onclick = () => { const v = $("player"); v.paused ? v.play().catch(() => {}) : v.pause(); };
+$("player").addEventListener("click", () => { if (!S.picking) $("vPlay").click(); });
+$("vSeek").addEventListener("input", () => {
+  const v = $("player"); S.seeking = true;
+  if (v.duration) v.currentTime = $("vSeek").value / 1000 * v.duration;
+});
+$("vSeek").addEventListener("change", () => { S.seeking = false; });
+$("vMute").onclick = () => { S.userMuted = !S.userMuted; applyMute(); };
+$("vFull").innerHTML = ICON.full;
+$("vFull").onclick = () => {
+  const box = $("videoStage");
+  if (document.fullscreenElement || document.webkitFullscreenElement) {
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  } else (box.requestFullscreen || box.webkitRequestFullscreen)?.call(box);
+};
+applyMute(); syncControls();
 
 // ------------------------------------------------------------- Start ----
 refreshView();
