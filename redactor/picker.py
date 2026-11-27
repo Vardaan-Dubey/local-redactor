@@ -23,6 +23,7 @@ KINDS = {
     "media": ("Choose a video or audio file", MEDIA_EXT),
     "transcript": ("Choose a transcript", TRANSCRIPT_EXT),
     "folder": ("Choose an output folder", None),
+    "export": ("Choose an export folder to show", None),
 }
 
 _lock = threading.Lock()  # one dialog at a time
@@ -37,7 +38,7 @@ def pick(kind: str, start: str | None = None) -> str | None:
     if kind not in KINDS:
         raise ValueError(f"Unknown picker kind: {kind}")
     title, exts = KINDS[kind]
-    folder = kind == "folder"
+    folder = kind in ("folder", "export")
     start_dir = _start_dir(start)
     if not _lock.acquire(blocking=False):
         raise RuntimeError("A file dialog is already open")

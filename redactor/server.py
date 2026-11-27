@@ -39,7 +39,7 @@ class State:
         self.media_info: dict | None = None
         self.transcript = None
         self.out_root: Path | None = None
-        self.exports: list[dict] = []  # earlier exports of these exact files, newest first
+        self.exports: list[dict] = []  # the export shown in the Redacted view (chosen or just made)
         self.jobs: dict[str, dict] = {}
         self.lock = threading.Lock()
 
@@ -52,36 +52,67 @@ class State:
             raise FileNotFoundError(f"Transcript not found: {transcript}")
         if not media and not transcript:
             raise ValueError("Provide a media file and/or a transcript")
+        old_transcript = self.transcript.source_path if self.transcript else None
+        if media != self.media or transcript != old_transcript:
+            self.exports = []  # a chosen export belongs to the previous files
         self.media = media
         self.media_info = M.probe(media).to_dict() if media else None
         self.transcript = load_transcript(transcript) if transcript else None
         self.out_root = Path(out_root).expanduser().resolve() if out_root else \
             default_output_root(media, transcript)
-        self.find_exports()
 
-    # Every export folder holds a redaction_report.json with the word positions,
-    # settings and source files it was made from. Reading those (rather than
-    # keeping a separate record) finds every export of these files, old or new.
+    # An export is only shown when the user picks its folder ("Open export…") or
+    # has just made it. Each export folder holds a redaction_report.json with the
+    # word positions, settings and source files it was made from.
     MEDIA_OUT = {".mp4", ".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
+    TRANSCRIPT_EXT = {".srt", ".vtt", ".json", ".txt"}
 
-    def find_exports(self):
-        found = []
-        tpath = self.transcript.source_path if self.transcript else None
-        want = {p for p in (self.media, tpath) if p}
-        for rep in sorted(self.out_root.glob("export_*/redaction_report.json"), reverse=True):
-            try:
-                r = json.loads(rep.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if set(r.get("sources_sha256_unchanged") or {}) != want:
-                continue
-            outs = [f for f in rep.parent.iterdir()
-                    if ".redacted." in f.name and f.suffix.lower() in self.MEDIA_OUT]
-            found.append({"id": rep.parent.name, "created": r.get("created"),
-                          "redacted": r.get("redacted_word_indices") or [],
-                          "options": r.get("options") or {},
-                          "media_out": str(outs[0]) if outs else None})
-        self.exports = found
+    @classmethod
+    def read_export(cls, folder: Path) -> dict | None:
+        try:
+            r = json.loads((folder / "redaction_report.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        files = sorted(f for f in folder.iterdir() if ".redacted." in f.name)
+        media_out = [f for f in files if f.suffix.lower() in cls.MEDIA_OUT]
+        # Prefer the redacted transcript in its original format over the .txt copy.
+        t_out = sorted((f for f in files if f.suffix.lower() in cls.TRANSCRIPT_EXT),
+                       key=lambda f: f.suffix.lower() == ".txt")
+        sources = list(r.get("sources_sha256_unchanged") or {})
+        return {"id": folder.name, "dir": str(folder), "created": r.get("created"),
+                "redacted": r.get("redacted_word_indices") or [],
+                "options": r.get("options") or {},
+                "media_out": str(media_out[0]) if media_out else None,
+                "transcript_out": str(t_out[0]) if t_out else None,
+                "source_media": next((x for x in sources
+                                      if Path(x).suffix.lower() not in cls.TRANSCRIPT_EXT), None),
+                "source_transcript": next((x for x in sources
+                                           if Path(x).suffix.lower() in cls.TRANSCRIPT_EXT), None)}
+
+    def open_export(self, folder: str) -> bool:
+        """Open an export folder (or a *_redacted folder: its newest export).
+        Returns True when its original files were found and opened, so the
+        Redacted view can play the export; False when they've moved and the
+        redacted copy itself was opened instead."""
+        f = Path(folder).expanduser().resolve()
+        if not (f / "redaction_report.json").is_file():
+            inside = sorted(f.glob("export_*/redaction_report.json"))
+            if not inside:
+                raise ValueError("No export in that folder. Choose an export_… folder "
+                                 "(or the …_redacted folder that holds them).")
+            f = inside[-1].parent
+        ex = self.read_export(f)
+        if not ex:
+            raise ValueError(f"Couldn't read the redaction_report.json in {f}")
+        m, t = ex["source_media"], ex["source_transcript"]
+        if t and Path(t).is_file() and (not m or Path(m).is_file()):
+            self.open(m, t, str(f.parent))
+            self.exports = [ex]
+            return True
+        if not ex["media_out"] and not ex["transcript_out"]:
+            raise ValueError("The original files for this export have moved, and it has no redacted copies to show.")
+        self.open(ex["media_out"], ex["transcript_out"], str(f.parent))
+        return False
 
     def export_media(self, export_id: str) -> str | None:
         return next((e["media_out"] for e in self.exports if e["id"] == export_id), None)
@@ -98,7 +129,7 @@ class State:
             "transcript": self.transcript.to_ui() if self.transcript else None,
             "out_root": str(self.out_root) if self.out_root else None,
             "whisper_model": self.cfg.get("whisper_model"),
-            "exports": [{k: e[k] for k in ("id", "created", "redacted", "options")}
+            "exports": [{k: e[k] for k in ("id", "dir", "created", "redacted", "options")}
                         | {"has_media": bool(e["media_out"])} for e in self.exports],
             "media_is_export": self.media_is_export(),
             "session": SESSION,
@@ -256,6 +287,9 @@ def make_handler(state: State, port: int):
                     return self._export(body)
                 if path == "/api/transcribe":
                     return self._transcribe(body)
+                if path == "/api/open-export":
+                    found = state.open_export(body.get("folder") or "")
+                    return self._json({"state": state.snapshot(), "originals_found": found})
                 if path == "/api/pick":
                     from .picker import pick
                     return self._json({"path": pick(body.get("kind", ""), body.get("start") or None)})
@@ -273,7 +307,8 @@ def make_handler(state: State, port: int):
             def job(progress):
                 res = export(tr, body.get("redacted", []), media, out_root, opts, progress)
                 if state.media == media and state.transcript is tr:  # files not switched meanwhile
-                    state.find_exports()
+                    ex = state.read_export(Path(res["out_dir"]))
+                    state.exports = [ex] if ex else []
                 return res
 
             self._json({"job": state.start_job(job)})

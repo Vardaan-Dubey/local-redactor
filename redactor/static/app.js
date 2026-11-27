@@ -66,7 +66,7 @@ function applyState(st) {
   // code change (same launch). A fresh launch of the app starts blank.
   if (st.media || st.transcript_path) {
     try {
-      localStorage.setItem("lastOpen", JSON.stringify({ session: st.session,
+      localStorage.setItem("lastOpen", JSON.stringify({ session: st.session, export_dir: st.exports?.[0]?.dir,
         files: { media: st.media, transcript: st.transcript_path, out_root: st.out_root } }));
     } catch (_) {}
   }
@@ -506,6 +506,38 @@ document.querySelectorAll(".browse").forEach((btn) => {
   };
 });
 
+// "Open export…": show an export made earlier. Its original video and
+// transcript open with the same marks and settings, so the Redacted view plays
+// the exported file (and editing anything switches back to the live preview).
+$("openExportBtn").onclick = async () => {
+  const btn = $("openExportBtn");
+  btn.disabled = true;
+  try {
+    const start = $("outRoot").value.trim() || $("mediaPath").value.trim();
+    const { path } = await api("/api/pick", { kind: "export", start });
+    if (!path) return;  // cancelled
+    const { state, originals_found } = await api("/api/open-export", { folder: path });
+    applyState(state);
+    const ex = state.exports[0];
+    if (originals_found && ex) {
+      const o = ex.options || {};
+      if (o.pad_before != null) $("padBefore").value = o.pad_before;
+      if (o.pad_after != null) $("padAfter").value = o.pad_after;
+      if (o.blur_mode) $("blurMode").value = o.blur_mode;
+      if (o.failsafe != null) $("failsafe").checked = !!o.failsafe;
+      S.picks = (o.speaker_picks || []).map(({ t, x, y }) => ({ t, x, y }));
+      savePicks(); renderPicks();
+      S.red = new Set(ex.redacted.filter((i) => i < S.words.length));
+      S.undo = []; S.redo = [];
+      updateRedactions();
+      setView("redacted");
+    } else {
+      alert("The original video or transcript for this export has moved, so its redacted copy is open on its own.");
+    }
+  } catch (err) { alert(err.message); }
+  finally { btn.disabled = false; }
+};
+
 $("transcribeBtn").onclick = async () => {
   try {
     if (!S.state?.media) {
@@ -578,7 +610,10 @@ refreshView();
     let last = null;
     try { last = JSON.parse(localStorage.getItem("lastOpen") || "null"); } catch (_) {}
     if (last?.session && last.session === st.session) {
-      try { st = await api("/api/open", last.files); }
+      try {
+        st = last.export_dir ? (await api("/api/open-export", { folder: last.export_dir })).state
+                             : await api("/api/open", last.files);
+      }
       catch (_) { try { localStorage.removeItem("lastOpen"); } catch (_) {} }  // moved or deleted
     }
   }

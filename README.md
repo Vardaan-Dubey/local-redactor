@@ -55,7 +55,8 @@ This opens the editor in your browser. You can also start it with no arguments a
 
 1. **Select text** with the mouse and press **R** (or click the floating *Redact* button). Press **U** to un-redact a selection. **Ctrl/Cmd+Z** undoes.
 2. **Find phrase → Redact all matches** redacts every occurrence of a name, number and so on.
-3. Click any word to jump the player there. Use the **Original / Redacted** switch under the player (or press **V**) to compare. *Original* plays the source with redacted words readable but marked. *Redacted* plays the exported copy whose report matches your current marks and settings. If no export matches yet, it shows a rough preview: the words are blacked out and muted, and the whole frame is blurred while they're spoken, because the browser can't find faces. Opening a `.redacted` file the tool made plays it as is.
+3. Click any word to jump the player there. Use the **Original / Redacted** switch under the player (or press **V**) to compare. *Original* plays the source with redacted words readable but marked. *Redacted* shows a rough preview: the words are blacked out and muted, and the whole frame is blurred while they're spoken, because the browser can't find faces. After you export, it plays the real exported copy (until you change a mark or setting). Opening a `.redacted` file the tool made plays it as is.
+5. **Open export…** shows an export made earlier, for example to demo it. Choose its `export_…` folder (or the `…_redacted` folder, for the newest one). The original video and transcript open with that export's marks and settings, and the *Redacted* view plays its redacted copy. Exports are never picked up on their own; you choose which one to show.
 4. **Export redacted copies**. The *Redacted* view then plays the exported file.
 
 Your selections are saved automatically in the browser's local storage. Only word positions and the paths of the open files are saved, not the words.
